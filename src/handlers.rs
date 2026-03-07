@@ -77,7 +77,7 @@ pub struct TranscribeResponse {
     #[serde(skip_serializing_if = "is_zero")]
     pub speech_ms: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub words: Vec<transcribe::WordTimestamp>,
+    pub words: Vec<crate::words::WordTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

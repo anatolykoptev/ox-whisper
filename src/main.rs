@@ -16,6 +16,7 @@ mod punctuate;
 mod streaming;
 mod transcribe;
 mod vad;
+mod words;
 
 use crate::config::Config;
 use crate::handlers::AppState;

@@ -131,13 +131,14 @@ fn transcribe_ru(models: &Models, chunks: &[Vec<f32>]) -> Result<Vec<String>, Tr
     let pool = models.ru.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
     let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
-    let mut texts = Vec::new();
-    for chunk in chunks {
-        let text = rec.transcribe(16000, chunk).trim().to_string();
-        if !text.is_empty() && compression_ratio(&text) <= 2.4 {
-            texts.push(text);
-        }
-    }
+    let chunk_refs: Vec<&[f32]> = chunks.iter().map(|c| c.as_slice()).collect();
+    let raw_texts = rec.transcribe_batch(16000, &chunk_refs);
+    let texts = raw_texts.into_iter()
+        .filter_map(|t| {
+            let t = t.trim().to_string();
+            if !t.is_empty() && compression_ratio(&t) <= 2.4 { Some(t) } else { None }
+        })
+        .collect();
     Ok(texts)
 }
 

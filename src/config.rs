@@ -28,6 +28,8 @@ pub struct Config {
     pub vad_min_silence_s: f32,
     /// Padding added around speech segments, seconds (VAD_SPEECH_PAD_S, default: 0.05)
     pub vad_speech_pad_s: f32,
+    /// ONNX execution provider (ONNX_PROVIDER, default: "xnnpack")
+    pub provider: String,
 }
 
 impl Config {
@@ -76,6 +78,8 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.05),
+            provider: env::var("ONNX_PROVIDER")
+                .unwrap_or_else(|_| "cpu".to_string()),
         }
     }
 }

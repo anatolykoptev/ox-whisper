@@ -11,6 +11,13 @@ WORKDIR /app
 COPY vendor/ vendor/
 COPY Cargo.toml Cargo.lock ./
 
+# Optimize sherpa-onnx session: enable ORT_ENABLE_ALL graph optimizations, set inter_op=1
+RUN sed -i \
+    -e 's/SetInterOpNumThreads(num_threads)/SetInterOpNumThreads(1)/' \
+    -e 's|// sess_opts.SetGraphOptimizationLevel|sess_opts.SetGraphOptimizationLevel|' \
+    -e 's/ORT_ENABLE_EXTENDED/ORT_ENABLE_ALL/' \
+    vendor/sherpa-rs-sys/sherpa-onnx/sherpa-onnx/csrc/session.cc
+
 # Build deps only (dummy main)
 RUN mkdir src && echo "fn main(){}" > src/main.rs && \
     SHERPA_LIB_PATH=/app/vendor/sherpa-onnx cargo build --release && \

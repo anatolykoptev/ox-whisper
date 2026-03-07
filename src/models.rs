@@ -43,6 +43,7 @@ fn load_moonshine(config: &Config) -> Option<Pool<MoonshineRecognizer>> {
             merged_decoder: merged_path,
             tokens: format!("{}/tokens.txt", config.models_dir),
             num_threads: Some(config.num_threads),
+            provider: Some(config.provider.clone()),
             ..Default::default()
         }
     } else if Path::new(&preprocess_path).exists() {
@@ -54,6 +55,7 @@ fn load_moonshine(config: &Config) -> Option<Pool<MoonshineRecognizer>> {
             cached_decoder: format!("{}/cached_decode.int8.onnx", config.models_dir),
             tokens: format!("{}/tokens.txt", config.models_dir),
             num_threads: Some(config.num_threads),
+            provider: Some(config.provider.clone()),
             ..Default::default()
         }
     } else {
@@ -107,6 +109,7 @@ fn load_nemo_ctc(config: &Config, model: &str, tokens: &str) -> Option<Pool<RuRe
         model: model.to_string(),
         tokens: tokens.to_string(),
         num_threads: Some(config.num_threads),
+        provider: Some(config.provider.clone()),
         ..Default::default()
     };
     let mut recognizers = Vec::new();
@@ -132,6 +135,7 @@ fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecogniz
         joiner: format!("{}/joiner.int8.onnx", config.ru_models_dir),
         tokens: format!("{}/tokens.txt", config.ru_models_dir),
         num_threads: config.num_threads,
+        provider: Some(config.provider.clone()),
         ..Default::default()
     };
     let mut recognizers = Vec::new();

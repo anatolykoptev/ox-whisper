@@ -1,6 +1,9 @@
 pub mod audio;
 pub mod chunking;
 mod config;
+pub mod models;
+pub mod punctuate;
+pub mod vad;
 
 use axum::{Router, routing::get};
 use serde::Serialize;

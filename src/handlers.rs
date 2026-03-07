@@ -132,15 +132,15 @@ pub async fn transcribe_upload(
     }
 }
 
-struct UploadData {
-    file_path: std::path::PathBuf,
-    language: String,
-    vad: Option<bool>,
-    max_chunk_len: usize,
-    punctuate: Option<bool>,
+pub(crate) struct UploadData {
+    pub file_path: std::path::PathBuf,
+    pub language: String,
+    pub vad: Option<bool>,
+    pub max_chunk_len: usize,
+    pub punctuate: Option<bool>,
 }
 
-async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData, String> {
+pub(crate) async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData, String> {
     let mut file_path: Option<std::path::PathBuf> = None;
     let mut language = "en".to_string();
     let mut vad: Option<bool> = None;

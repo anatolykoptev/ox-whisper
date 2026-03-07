@@ -8,9 +8,11 @@ use tokio::net::TcpListener;
 mod audio;
 mod chunking;
 mod config;
+mod handler_stream;
 mod handlers;
 mod models;
 mod punctuate;
+mod streaming;
 mod transcribe;
 mod vad;
 
@@ -39,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(handlers::health))
         .route("/transcribe", post(handlers::transcribe_json))
         .route("/transcribe/upload", post(handlers::transcribe_upload))
+        .route("/transcribe/stream", post(handler_stream::transcribe_stream))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .with_state(state);
 

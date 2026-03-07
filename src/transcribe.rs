@@ -160,7 +160,7 @@ fn transcribe_ru(
     Ok(texts)
 }
 
-fn maybe_punctuate(
+pub(crate) fn maybe_punctuate(
     models: &Models,
     text: &str,
     language: &str,
@@ -182,14 +182,14 @@ fn maybe_punctuate(
 
 const MAX_CHUNK_SAMPLES: usize = 5 * 16000; // 5s at 16kHz
 
-fn split_audio_chunks(samples: Vec<f32>, _sample_rate: u32) -> Vec<Vec<f32>> {
+pub(crate) fn split_audio_chunks(samples: Vec<f32>, _sample_rate: u32) -> Vec<Vec<f32>> {
     if samples.len() <= MAX_CHUNK_SAMPLES {
         return vec![samples];
     }
     samples.chunks(MAX_CHUNK_SAMPLES).map(|c| c.to_vec()).collect()
 }
 
-fn compression_ratio(text: &str) -> f64 {
+pub(crate) fn compression_ratio(text: &str) -> f64 {
     if text.len() < 10 {
         return 0.0;
     }

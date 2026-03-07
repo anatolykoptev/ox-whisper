@@ -123,9 +123,9 @@ fn transcribe_en(
     chunks: &[Vec<f32>],
     language: &str,
 ) -> Result<Vec<String>, TranscribeError> {
-    let en_mutex = models.en.as_ref()
+    let pool = models.en.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
-    let mut rec = en_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
+    let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
     let mut texts = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let result = rec.transcribe(16000, chunk);
@@ -147,9 +147,9 @@ fn transcribe_ru(
     models: &Models,
     chunks: &[Vec<f32>],
 ) -> Result<Vec<String>, TranscribeError> {
-    let ru_mutex = models.ru.as_ref()
+    let pool = models.ru.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
-    let mut rec = ru_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
+    let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
     let mut texts = Vec::new();
     for chunk in chunks {
         let text = rec.transcribe(16000, chunk).trim().to_string();

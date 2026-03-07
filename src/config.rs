@@ -20,6 +20,8 @@ pub struct Config {
     pub vad_min_duration_s: f64,
     /// Maximum audio duration in seconds (MAX_AUDIO_DURATION_S, default: 300.0)
     pub max_audio_duration_s: f64,
+    /// Number of recognizer instances per model (POOL_SIZE, default: 2)
+    pub pool_size: usize,
 }
 
 impl Config {
@@ -52,6 +54,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300.0),
+            pool_size: env::var("POOL_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
         }
     }
 }

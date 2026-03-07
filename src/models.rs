@@ -7,10 +7,11 @@ use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
 use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 
 use crate::config::Config;
+use crate::pool::Pool;
 
 pub struct Models {
-    pub en: Option<Mutex<MoonshineRecognizer>>,
-    pub ru: Option<Mutex<TransducerRecognizer>>,
+    pub en: Option<Pool<MoonshineRecognizer>>,
+    pub ru: Option<Pool<TransducerRecognizer>>,
     pub vad: Option<Mutex<SileroVad>>,
     pub punct: Option<Mutex<OnlinePunctuation>>,
 }
@@ -29,12 +30,11 @@ impl Models {
     }
 }
 
-fn load_moonshine(config: &Config) -> Option<Mutex<MoonshineRecognizer>> {
+fn load_moonshine(config: &Config) -> Option<Pool<MoonshineRecognizer>> {
     let merged_path = format!("{}/decoder_model_merged.ort", config.models_dir);
     let preprocess_path = format!("{}/preprocess.onnx", config.models_dir);
 
     let moonshine_cfg = if Path::new(&merged_path).exists() {
-        // Moonshine v2: encoder + merged_decoder
         tracing::info!("Detected Moonshine v2 model format");
         MoonshineConfig {
             encoder: format!("{}/encoder_model.ort", config.models_dir),
@@ -44,7 +44,6 @@ fn load_moonshine(config: &Config) -> Option<Mutex<MoonshineRecognizer>> {
             ..Default::default()
         }
     } else if Path::new(&preprocess_path).exists() {
-        // Moonshine v1: preprocessor + encoder + uncached/cached decoder
         tracing::info!("Detected Moonshine v1 model format");
         MoonshineConfig {
             preprocessor: preprocess_path,
@@ -63,19 +62,28 @@ fn load_moonshine(config: &Config) -> Option<Mutex<MoonshineRecognizer>> {
         return None;
     };
 
-    match MoonshineRecognizer::new(moonshine_cfg) {
-        Ok(recognizer) => {
-            tracing::info!("EN (Moonshine) model loaded from {}", config.models_dir);
-            Some(Mutex::new(recognizer))
+    let mut recognizers = Vec::new();
+    for i in 0..config.pool_size {
+        match MoonshineRecognizer::new(moonshine_cfg.clone()) {
+            Ok(r) => {
+                tracing::info!("EN recognizer {}/{} loaded", i + 1, config.pool_size);
+                recognizers.push(r);
+            }
+            Err(e) => {
+                tracing::error!("EN recognizer {}/{} failed: {}", i + 1, config.pool_size, e);
+                break;
+            }
         }
-        Err(e) => {
-            tracing::error!("Failed to load EN model: {}", e);
-            None
-        }
+    }
+
+    if recognizers.is_empty() {
+        None
+    } else {
+        Some(Pool::new(recognizers))
     }
 }
 
-fn load_zipformer(config: &Config) -> Option<Mutex<TransducerRecognizer>> {
+fn load_zipformer(config: &Config) -> Option<Pool<TransducerRecognizer>> {
     let encoder_path = format!("{}/encoder.int8.onnx", config.ru_models_dir);
     if !Path::new(&encoder_path).exists() {
         tracing::warn!("RU model not found at {}, skipping", encoder_path);
@@ -91,15 +99,24 @@ fn load_zipformer(config: &Config) -> Option<Mutex<TransducerRecognizer>> {
         ..Default::default()
     };
 
-    match TransducerRecognizer::new(transducer_cfg) {
-        Ok(recognizer) => {
-            tracing::info!("RU (Zipformer) model loaded from {}", config.ru_models_dir);
-            Some(Mutex::new(recognizer))
+    let mut recognizers = Vec::new();
+    for i in 0..config.pool_size {
+        match TransducerRecognizer::new(transducer_cfg.clone()) {
+            Ok(r) => {
+                tracing::info!("RU recognizer {}/{} loaded", i + 1, config.pool_size);
+                recognizers.push(r);
+            }
+            Err(e) => {
+                tracing::error!("RU recognizer {}/{} failed: {}", i + 1, config.pool_size, e);
+                break;
+            }
         }
-        Err(e) => {
-            tracing::error!("Failed to load RU model: {}", e);
-            None
-        }
+    }
+
+    if recognizers.is_empty() {
+        None
+    } else {
+        Some(Pool::new(recognizers))
     }
 }
 
@@ -157,20 +174,22 @@ fn load_punctuation(config: &Config) -> Option<Mutex<OnlinePunctuation>> {
     }
 }
 
-fn warmup_en(en: &Option<Mutex<MoonshineRecognizer>>) {
-    if let Some(m) = en {
-        let mut rec = m.lock().expect("EN warmup lock");
-        let silence = vec![0.0f32; 16000];
-        let _ = rec.transcribe(16000, &silence);
-        tracing::info!("EN warmup complete");
+fn warmup_en(en: &Option<Pool<MoonshineRecognizer>>) {
+    if let Some(pool) = en {
+        if let Some(mut rec) = pool.acquire() {
+            let silence = vec![0.0f32; 16000];
+            let _ = rec.transcribe(16000, &silence);
+            tracing::info!("EN warmup complete");
+        }
     }
 }
 
-fn warmup_ru(ru: &Option<Mutex<TransducerRecognizer>>) {
-    if let Some(m) = ru {
-        let mut rec = m.lock().expect("RU warmup lock");
-        let silence = vec![0.0f32; 16000];
-        let _ = rec.transcribe(16000, &silence);
-        tracing::info!("RU warmup complete");
+fn warmup_ru(ru: &Option<Pool<TransducerRecognizer>>) {
+    if let Some(pool) = ru {
+        if let Some(mut rec) = pool.acquire() {
+            let silence = vec![0.0f32; 16000];
+            let _ = rec.transcribe(16000, &silence);
+            tracing::info!("RU warmup complete");
+        }
     }
 }

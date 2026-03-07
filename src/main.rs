@@ -11,6 +11,7 @@ mod config;
 mod handler_stream;
 mod handlers;
 mod models;
+mod pool;
 mod punctuate;
 mod streaming;
 mod transcribe;

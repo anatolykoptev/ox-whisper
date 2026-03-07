@@ -1,30 +1,21 @@
-pub mod audio;
-pub mod chunking;
-mod config;
-pub mod models;
-pub mod punctuate;
-pub mod vad;
+use std::sync::Arc;
 
-use axum::{Router, routing::get};
-use serde::Serialize;
+use axum::Router;
+use axum::routing::{get, post};
 use tokio::net::TcpListener;
 
+mod audio;
+mod chunking;
+mod config;
+mod handlers;
+mod models;
+mod punctuate;
+mod transcribe;
+mod vad;
+
 use crate::config::Config;
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
-    engine: &'static str,
-    version: &'static str,
-}
-
-async fn health() -> axum::Json<HealthResponse> {
-    axum::Json(HealthResponse {
-        status: "starting",
-        engine: "sherpa-onnx",
-        version: "0.1.0",
-    })
-}
+use crate::handlers::AppState;
+use crate::models::Models;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,10 +27,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env();
+    let port = config.port;
 
-    let app = Router::new().route("/health", get(health));
+    tracing::info!("Loading models...");
+    let models = Models::load(&config);
 
-    let addr = format!("0.0.0.0:{}", config.port);
+    let state = Arc::new(AppState { models, config });
+
+    let app = Router::new()
+        .route("/health", get(handlers::health))
+        .route("/transcribe", post(handlers::transcribe_json))
+        .route("/transcribe/upload", post(handlers::transcribe_upload))
+        .with_state(state);
+
+    let addr = format!("0.0.0.0:{}", port);
     tracing::info!("Starting ox-whisper on {}", addr);
 
     let listener = TcpListener::bind(&addr).await?;

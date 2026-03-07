@@ -7,6 +7,7 @@ pub struct VadResult {
 
 const WINDOW_SIZE: usize = 512;
 const MAX_CHUNK_SECONDS: usize = 5;
+const PAD_SAMPLES: usize = 800; // 50ms of silence at 16kHz
 
 /// Applies Voice Activity Detection to split audio into speech chunks.
 ///
@@ -51,7 +52,11 @@ pub fn apply_vad(vad: &mut SileroVad, samples: &[f32], sample_rate: u32) -> VadR
     let mut current_chunk: Vec<f32> = Vec::new();
 
     for segment in segments {
-        let mut seg_samples = &segment.samples[..];
+        // Prepend 50ms of silence to reduce boundary artifacts
+        let mut padded = Vec::with_capacity(PAD_SAMPLES + segment.samples.len());
+        padded.extend(std::iter::repeat_n(0.0f32, PAD_SAMPLES));
+        padded.extend_from_slice(&segment.samples);
+        let mut seg_samples = &padded[..];
 
         // Force-split segments longer than max
         while !seg_samples.is_empty() {

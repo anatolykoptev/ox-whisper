@@ -41,7 +41,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         });
     }
     languages.insert("ru", LanguageInfo {
-        model: "zipformer-ru-int8",
+        model: "gigaam-v2-ctc-int8",
         ready: state.models.ru.is_some(),
     });
 

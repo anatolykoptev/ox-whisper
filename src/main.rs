@@ -13,6 +13,7 @@ mod handlers;
 mod models;
 mod pool;
 mod punctuate;
+mod recognizer;
 mod streaming;
 mod transcribe;
 mod vad;

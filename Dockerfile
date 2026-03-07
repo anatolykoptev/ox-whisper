@@ -6,11 +6,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main(){}" > src/main.rs && cargo build --release && rm -rf src
 
+# Copy vendored dependencies first for layer caching
+COPY vendor/ vendor/
+COPY Cargo.toml Cargo.lock ./
+
+# Build deps only (dummy main)
+RUN mkdir src && echo "fn main(){}" > src/main.rs && \
+    SHERPA_LIB_PATH=/app/vendor/sherpa-onnx cargo build --release && \
+    rm -rf src target/release/deps/ox_whisper* target/release/ox-whisper
+
+# Build actual binary
 COPY src/ src/
-RUN cargo build --release
+RUN SHERPA_LIB_PATH=/app/vendor/sherpa-onnx cargo build --release
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -19,10 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates ffmpeg curl && \
     rm -rf /var/lib/apt/lists/*
 
-# sherpa-onnx dynamic libraries
-COPY --from=builder /app/target/release/libsherpa-onnx-c-api.so /usr/lib/
-COPY --from=builder /app/target/release/libsherpa-onnx-cxx-api.so /usr/lib/
-COPY --from=builder /app/target/release/libonnxruntime.so /usr/lib/
+# sherpa-onnx shared libraries from vendor
+COPY vendor/sherpa-onnx/lib/libsherpa-onnx-c-api.so /usr/lib/
+COPY vendor/sherpa-onnx/lib/libsherpa-onnx-cxx-api.so /usr/lib/
+COPY vendor/sherpa-onnx/lib/libonnxruntime.so /usr/lib/
 RUN ldconfig
 
 COPY --from=builder /app/target/release/ox-whisper /usr/local/bin/ox-whisper
@@ -32,6 +40,7 @@ ENV MOONSHINE_MODELS_DIR=/models
 ENV ZIPFORMER_RU_DIR=/ru-models
 ENV SILERO_VAD_MODEL=/vad/silero_vad.onnx
 ENV PUNCT_MODEL=/punct/model.int8.onnx
+ENV PUNCT_VOCAB=/punct/bpe.vocab
 
 EXPOSE 8092
 

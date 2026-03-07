@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 
@@ -38,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(handlers::health))
         .route("/transcribe", post(handlers::transcribe_json))
         .route("/transcribe/upload", post(handlers::transcribe_upload))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);

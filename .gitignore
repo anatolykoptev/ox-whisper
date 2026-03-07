@@ -1,2 +1,4 @@
 /target
 .env
+vendor/sherpa-onnx/lib/*.so
+vendor/sherpa-onnx/lib/lib/

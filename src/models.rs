@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use sherpa_rs::moonshine::{MoonshineConfig, MoonshineRecognizer};
-use sherpa_rs::punctuate::{Punctuation, PunctuationConfig};
+use sherpa_rs::online_punctuate::{OnlinePunctuation, OnlinePunctuationConfig};
 use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
 use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 
@@ -12,7 +12,7 @@ pub struct Models {
     pub en: Option<Mutex<MoonshineRecognizer>>,
     pub ru: Option<Mutex<TransducerRecognizer>>,
     pub vad: Option<Mutex<SileroVad>>,
-    pub punct: Option<Mutex<Punctuation>>,
+    pub punct: Option<Mutex<OnlinePunctuation>>,
 }
 
 impl Models {
@@ -30,20 +30,37 @@ impl Models {
 }
 
 fn load_moonshine(config: &Config) -> Option<Mutex<MoonshineRecognizer>> {
+    let merged_path = format!("{}/decoder_model_merged.ort", config.models_dir);
     let preprocess_path = format!("{}/preprocess.onnx", config.models_dir);
-    if !Path::new(&preprocess_path).exists() {
-        tracing::warn!("EN model not found at {}, skipping", preprocess_path);
-        return None;
-    }
 
-    let moonshine_cfg = MoonshineConfig {
-        preprocessor: preprocess_path,
-        encoder: format!("{}/encode.int8.onnx", config.models_dir),
-        uncached_decoder: format!("{}/uncached_decode.int8.onnx", config.models_dir),
-        cached_decoder: format!("{}/cached_decode.int8.onnx", config.models_dir),
-        tokens: format!("{}/tokens.txt", config.models_dir),
-        num_threads: Some(config.num_threads),
-        ..Default::default()
+    let moonshine_cfg = if Path::new(&merged_path).exists() {
+        // Moonshine v2: encoder + merged_decoder
+        tracing::info!("Detected Moonshine v2 model format");
+        MoonshineConfig {
+            encoder: format!("{}/encoder_model.ort", config.models_dir),
+            merged_decoder: merged_path,
+            tokens: format!("{}/tokens.txt", config.models_dir),
+            num_threads: Some(config.num_threads),
+            ..Default::default()
+        }
+    } else if Path::new(&preprocess_path).exists() {
+        // Moonshine v1: preprocessor + encoder + uncached/cached decoder
+        tracing::info!("Detected Moonshine v1 model format");
+        MoonshineConfig {
+            preprocessor: preprocess_path,
+            encoder: format!("{}/encode.int8.onnx", config.models_dir),
+            uncached_decoder: format!("{}/uncached_decode.int8.onnx", config.models_dir),
+            cached_decoder: format!("{}/cached_decode.int8.onnx", config.models_dir),
+            tokens: format!("{}/tokens.txt", config.models_dir),
+            num_threads: Some(config.num_threads),
+            ..Default::default()
+        }
+    } else {
+        tracing::warn!(
+            "EN model not found at {} (no v2 merged decoder or v1 preprocessor), skipping",
+            config.models_dir
+        );
+        return None;
     };
 
     match MoonshineRecognizer::new(moonshine_cfg) {
@@ -113,7 +130,7 @@ fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {
     }
 }
 
-fn load_punctuation(config: &Config) -> Option<Mutex<Punctuation>> {
+fn load_punctuation(config: &Config) -> Option<Mutex<OnlinePunctuation>> {
     if !Path::new(&config.punct_model).exists() {
         tracing::warn!(
             "Punctuation model not found at {}, skipping",
@@ -122,12 +139,13 @@ fn load_punctuation(config: &Config) -> Option<Mutex<Punctuation>> {
         return None;
     }
 
-    let punct_cfg = PunctuationConfig {
-        model: config.punct_model.clone(),
+    let punct_cfg = OnlinePunctuationConfig {
+        cnn_bilstm: config.punct_model.clone(),
+        bpe_vocab: config.punct_vocab.clone(),
         ..Default::default()
     };
 
-    match Punctuation::new(punct_cfg) {
+    match OnlinePunctuation::new(punct_cfg) {
         Ok(punct) => {
             tracing::info!("Punctuation model loaded from {}", config.punct_model);
             Some(Mutex::new(punct))

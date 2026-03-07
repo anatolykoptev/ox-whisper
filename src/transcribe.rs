@@ -85,10 +85,10 @@ fn do_transcribe(
             let vad_result = apply_vad(&mut vad, &samples, 16000);
             (vad_result.chunks, vad_result.speech_ms)
         } else {
-            (vec![samples], 0.0)
+            (split_audio_chunks(samples, 16000), 0.0)
         }
     } else {
-        (vec![samples], 0.0)
+        (split_audio_chunks(samples, 16000), 0.0)
     };
 
     // 6. Select recognizer and transcribe chunks
@@ -123,10 +123,16 @@ fn transcribe_en(
         .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
     let mut rec = en_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
     let mut texts = Vec::new();
-    for chunk in chunks {
+    for (i, chunk) in chunks.iter().enumerate() {
         let result = rec.transcribe(16000, chunk);
         let text = result.text.trim().to_string();
-        if !text.is_empty() && compression_ratio(&text) <= 2.4 {
+        let ratio = compression_ratio(&text);
+        if text.is_empty() {
+            tracing::debug!("EN chunk {}: empty result ({} samples)", i, chunk.len());
+        } else if ratio > 2.4 {
+            tracing::warn!("EN chunk {}: compression ratio {:.2} > 2.4, skipping hallucination: {:?}",
+                i, ratio, &text[..text.len().min(80)]);
+        } else {
             texts.push(text);
         }
     }
@@ -162,12 +168,21 @@ fn maybe_punctuate(
     };
     if should_punctuate {
         if let Some(ref punct_mutex) = models.punct {
-            if let Ok(mut punct) = punct_mutex.lock() {
-                return add_punctuation(&mut punct, text);
+            if let Ok(punct) = punct_mutex.lock() {
+                return add_punctuation(&punct, text);
             }
         }
     }
     text.to_string()
+}
+
+const MAX_CHUNK_SAMPLES: usize = 5 * 16000; // 5s at 16kHz
+
+fn split_audio_chunks(samples: Vec<f32>, _sample_rate: u32) -> Vec<Vec<f32>> {
+    if samples.len() <= MAX_CHUNK_SAMPLES {
+        return vec![samples];
+    }
+    samples.chunks(MAX_CHUNK_SAMPLES).map(|c| c.to_vec()).collect()
 }
 
 fn compression_ratio(text: &str) -> f64 {

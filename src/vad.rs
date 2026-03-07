@@ -6,12 +6,13 @@ pub struct VadResult {
 }
 
 const WINDOW_SIZE: usize = 512;
-const MAX_CHUNK_SECONDS: usize = 25;
+const MAX_CHUNK_SECONDS: usize = 5;
 
 /// Applies Voice Activity Detection to split audio into speech chunks.
 ///
 /// Feeds samples through Silero VAD in 512-sample windows, collects
-/// speech segments, and groups them into chunks of at most 25 seconds.
+/// speech segments, and groups them into chunks of at most 5 seconds.
+/// Single segments longer than the limit are force-split.
 pub fn apply_vad(vad: &mut SileroVad, samples: &[f32], sample_rate: u32) -> VadResult {
     // Feed 512-sample windows
     let mut offset = 0;
@@ -44,18 +45,30 @@ pub fn apply_vad(vad: &mut SileroVad, samples: &[f32], sample_rate: u32) -> VadR
         .map(|s| s.samples.len() as f64 / sample_rate as f64 * 1000.0)
         .sum();
 
-    // Group segments into chunks (max 25s per chunk)
+    // Group segments into chunks, force-splitting segments exceeding the limit
     let max_chunk_samples = MAX_CHUNK_SECONDS * sample_rate as usize;
     let mut chunks: Vec<Vec<f32>> = Vec::new();
     let mut current_chunk: Vec<f32> = Vec::new();
 
     for segment in segments {
-        if !current_chunk.is_empty()
-            && current_chunk.len() + segment.samples.len() > max_chunk_samples
-        {
-            chunks.push(std::mem::take(&mut current_chunk));
+        let mut seg_samples = &segment.samples[..];
+
+        // Force-split segments longer than max
+        while !seg_samples.is_empty() {
+            let remaining_capacity = max_chunk_samples.saturating_sub(current_chunk.len());
+            if remaining_capacity == 0 {
+                chunks.push(std::mem::take(&mut current_chunk));
+                continue;
+            }
+
+            let take = seg_samples.len().min(remaining_capacity);
+            current_chunk.extend_from_slice(&seg_samples[..take]);
+            seg_samples = &seg_samples[take..];
+
+            if current_chunk.len() >= max_chunk_samples {
+                chunks.push(std::mem::take(&mut current_chunk));
+            }
         }
-        current_chunk.extend_from_slice(&segment.samples);
     }
 
     if !current_chunk.is_empty() {

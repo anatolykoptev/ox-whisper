@@ -1,8 +1,8 @@
-use sherpa_rs::punctuate::Punctuation;
+use sherpa_rs::online_punctuate::OnlinePunctuation;
 
-/// Adds punctuation to text using the sherpa-rs punctuation model.
+/// Adds punctuation to text using the CNN-BiLSTM online punctuation model.
 /// Returns empty string if input is empty.
-pub fn add_punctuation(punct: &mut Punctuation, text: &str) -> String {
+pub fn add_punctuation(punct: &OnlinePunctuation, text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }

@@ -12,6 +12,8 @@ pub struct Config {
     pub vad_model: String,
     /// Punctuation model path (PUNCT_MODEL, default: "/punct/model.int8.onnx")
     pub punct_model: String,
+    /// Punctuation BPE vocab path (PUNCT_VOCAB, default: "/punct/bpe.vocab")
+    pub punct_vocab: String,
     /// Number of threads for inference (MOONSHINE_THREADS, default: 4)
     pub num_threads: i32,
     /// Minimum VAD segment duration in seconds (VAD_MIN_DURATION_S, default: 10.0)
@@ -36,6 +38,8 @@ impl Config {
                 .unwrap_or_else(|_| "/vad/silero_vad.onnx".to_string()),
             punct_model: env::var("PUNCT_MODEL")
                 .unwrap_or_else(|_| "/punct/model.int8.onnx".to_string()),
+            punct_vocab: env::var("PUNCT_VOCAB")
+                .unwrap_or_else(|_| "/punct/bpe.vocab".to_string()),
             num_threads: env::var("MOONSHINE_THREADS")
                 .ok()
                 .and_then(|v| v.parse().ok())

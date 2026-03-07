@@ -1,3 +1,5 @@
+pub mod audio;
+pub mod chunking;
 mod config;
 
 use axum::{Router, routing::get};

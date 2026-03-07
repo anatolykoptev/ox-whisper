@@ -34,7 +34,7 @@ struct LanguageInfo {
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let mut languages = HashMap::new();
     languages.insert("en", LanguageInfo {
-        model: "moonshine-v2",
+        model: "moonshine-base-en",
         ready: state.models.en.is_some(),
     });
     languages.insert("ru", LanguageInfo {

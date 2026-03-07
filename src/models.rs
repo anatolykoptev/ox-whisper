@@ -30,17 +30,17 @@ impl Models {
 }
 
 fn load_moonshine(config: &Config) -> Option<Mutex<MoonshineRecognizer>> {
-    let encoder_path = format!("{}/encoder_model.ort", config.models_dir);
-    if !Path::new(&encoder_path).exists() {
-        tracing::warn!("EN model not found at {}, skipping", encoder_path);
+    let preprocess_path = format!("{}/preprocess.onnx", config.models_dir);
+    if !Path::new(&preprocess_path).exists() {
+        tracing::warn!("EN model not found at {}, skipping", preprocess_path);
         return None;
     }
 
     let moonshine_cfg = MoonshineConfig {
-        preprocessor: format!("{}/preprocess.onnx", config.models_dir),
-        encoder: encoder_path,
-        uncached_decoder: format!("{}/decoder_model_merged.ort", config.models_dir),
-        cached_decoder: String::new(),
+        preprocessor: preprocess_path,
+        encoder: format!("{}/encode.int8.onnx", config.models_dir),
+        uncached_decoder: format!("{}/uncached_decode.int8.onnx", config.models_dir),
+        cached_decoder: format!("{}/cached_decode.int8.onnx", config.models_dir),
         tokens: format!("{}/tokens.txt", config.models_dir),
         num_threads: Some(config.num_threads),
         ..Default::default()

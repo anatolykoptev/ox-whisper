@@ -128,8 +128,8 @@ fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {
 
     let vad_cfg = SileroVadConfig {
         model: config.vad_model.clone(),
-        threshold: 0.5,
-        min_silence_duration: 0.5,
+        threshold: config.vad_threshold,
+        min_silence_duration: config.vad_min_silence_s,
         min_speech_duration: 0.25,
         window_size: 512,
         ..Default::default()

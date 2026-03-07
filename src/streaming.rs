@@ -63,7 +63,7 @@ fn do_transcribe_streaming(
     let (audio_chunks, speech_ms) = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
             let mut vad = vad_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
-            let vad_result = apply_vad(&mut vad, &samples, 16000);
+            let vad_result = apply_vad(&mut vad, &samples, 16000, config.vad_speech_pad_s);
             (vad_result.chunks, vad_result.speech_ms)
         } else {
             (split_audio_chunks(samples, 16000), 0.0)
@@ -83,7 +83,7 @@ fn do_transcribe_streaming(
     let text = sanitize_utf8(joined.trim());
     let text = maybe_punctuate(models, &text, language, None);
 
-    Ok(TranscribeResult { text, chunks: Vec::new(), duration_ms: 0.0, speech_ms })
+    Ok(TranscribeResult { text, chunks: Vec::new(), duration_ms: 0.0, speech_ms, words: Vec::new() })
 }
 
 fn transcribe_ru_streaming(

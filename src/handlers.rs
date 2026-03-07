@@ -76,6 +76,8 @@ pub struct TranscribeResponse {
     pub duration_ms: f64,
     #[serde(skip_serializing_if = "is_zero")]
     pub speech_ms: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<transcribe::WordTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -127,7 +129,8 @@ pub async fn transcribe_upload(
         }
         Err(msg) => Json(TranscribeResponse {
             text: String::new(), chunks: Vec::new(),
-            duration_ms: 0.0, speech_ms: 0.0, error: Some(msg),
+            duration_ms: 0.0, speech_ms: 0.0,
+            words: Vec::new(), error: Some(msg),
         }),
     }
 }
@@ -178,11 +181,13 @@ fn to_response(result: Result<transcribe::TranscribeResult, transcribe::Transcri
     match result {
         Ok(r) => Json(TranscribeResponse {
             text: r.text, chunks: r.chunks,
-            duration_ms: r.duration_ms, speech_ms: r.speech_ms, error: None,
+            duration_ms: r.duration_ms, speech_ms: r.speech_ms,
+            words: r.words, error: None,
         }),
         Err(e) => Json(TranscribeResponse {
             text: String::new(), chunks: Vec::new(),
-            duration_ms: 0.0, speech_ms: 0.0, error: Some(e.to_string()),
+            duration_ms: 0.0, speech_ms: 0.0,
+            words: Vec::new(), error: Some(e.to_string()),
         }),
     }
 }

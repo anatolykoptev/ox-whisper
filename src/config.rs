@@ -22,6 +22,12 @@ pub struct Config {
     pub max_audio_duration_s: f64,
     /// Number of recognizer instances per model (POOL_SIZE, default: 2)
     pub pool_size: usize,
+    /// VAD speech probability threshold (VAD_THRESHOLD, default: 0.5)
+    pub vad_threshold: f32,
+    /// Minimum silence duration to split segments, seconds (VAD_MIN_SILENCE_S, default: 0.5)
+    pub vad_min_silence_s: f32,
+    /// Padding added around speech segments, seconds (VAD_SPEECH_PAD_S, default: 0.05)
+    pub vad_speech_pad_s: f32,
 }
 
 impl Config {
@@ -58,6 +64,18 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(2),
+            vad_threshold: env::var("VAD_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.5),
+            vad_min_silence_s: env::var("VAD_MIN_SILENCE_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.5),
+            vad_speech_pad_s: env::var("VAD_SPEECH_PAD_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.05),
         }
     }
 }

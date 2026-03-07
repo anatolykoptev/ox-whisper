@@ -29,6 +29,14 @@ pub struct TranscribeResult {
     pub chunks: Vec<String>,
     pub duration_ms: f64,
     pub speech_ms: f64,
+    pub words: Vec<WordTimestamp>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WordTimestamp {
+    pub word: String,
+    pub start: f32,
+    pub end: f32,
 }
 
 /// Core transcription pipeline: WAV conversion -> VAD -> recognition -> punctuation -> chunking.
@@ -82,7 +90,7 @@ fn do_transcribe(
     let (audio_chunks, speech_ms) = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
             let mut vad = vad_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
-            let vad_result = apply_vad(&mut vad, &samples, 16000);
+            let vad_result = apply_vad(&mut vad, &samples, 16000, config.vad_speech_pad_s);
             let total_ms = duration * 1000.0;
             let pct = if total_ms > 0.0 { 100.0 * vad_result.speech_ms / total_ms } else { 0.0 };
             tracing::info!("VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} chunk(s)",
@@ -96,9 +104,10 @@ fn do_transcribe(
     };
 
     // 6. Select recognizer and transcribe chunks
-    let texts = match language {
-        "ru" => transcribe_ru(models, &audio_chunks)?,
-        _ => transcribe_en(models, &audio_chunks, language)?,
+    let chunk_offsets: Vec<f64> = compute_chunk_offsets(&audio_chunks, 16000);
+    let (texts, words) = match language {
+        "ru" => (transcribe_ru(models, &audio_chunks)?, Vec::new()),
+        _ => transcribe_en(models, &audio_chunks, language, &chunk_offsets)?,
     };
 
     // 9. Join texts
@@ -115,18 +124,20 @@ fn do_transcribe(
         Vec::new()
     };
 
-    Ok(TranscribeResult { text, chunks, duration_ms: 0.0, speech_ms })
+    Ok(TranscribeResult { text, chunks, duration_ms: 0.0, speech_ms, words })
 }
 
 fn transcribe_en(
     models: &Models,
     chunks: &[Vec<f32>],
     language: &str,
-) -> Result<Vec<String>, TranscribeError> {
+    chunk_offsets: &[f64],
+) -> Result<(Vec<String>, Vec<WordTimestamp>), TranscribeError> {
     let pool = models.en.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
     let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
     let mut texts = Vec::new();
+    let mut words = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let result = rec.transcribe(16000, chunk);
         let text = result.text.trim().to_string();
@@ -134,13 +145,30 @@ fn transcribe_en(
         if text.is_empty() {
             tracing::debug!("EN chunk {}: empty result ({} samples)", i, chunk.len());
         } else if ratio > 2.4 {
+            // Retry with trimmed audio (drop first/last 5% to shift alignment)
+            let trim = chunk.len() / 20;
+            if trim > 0 && chunk.len() > trim * 2 + 1600 {
+                let trimmed = &chunk[trim..chunk.len() - trim];
+                let retry = rec.transcribe(16000, trimmed);
+                let retry_text = retry.text.trim().to_string();
+                let retry_ratio = compression_ratio(&retry_text);
+                if !retry_text.is_empty() && retry_ratio <= 2.4 {
+                    tracing::info!("EN chunk {}: retry succeeded (ratio {:.2} -> {:.2})", i, ratio, retry_ratio);
+                    let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
+                    extract_words(&retry.tokens, &retry.timestamps, offset, &mut words);
+                    texts.push(retry_text);
+                    continue;
+                }
+            }
             tracing::warn!("EN chunk {}: compression ratio {:.2} > 2.4, skipping hallucination: {:?}",
                 i, ratio, &text[..text.len().min(80)]);
         } else {
+            let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
+            extract_words(&result.tokens, &result.timestamps, offset, &mut words);
             texts.push(text);
         }
     }
-    Ok(texts)
+    Ok((texts, words))
 }
 
 fn transcribe_ru(
@@ -158,6 +186,58 @@ fn transcribe_ru(
         }
     }
     Ok(texts)
+}
+
+fn compute_chunk_offsets(chunks: &[Vec<f32>], sample_rate: u32) -> Vec<f64> {
+    let mut offsets = Vec::with_capacity(chunks.len());
+    let mut offset = 0.0;
+    for chunk in chunks {
+        offsets.push(offset);
+        offset += chunk.len() as f64 / sample_rate as f64;
+    }
+    offsets
+}
+
+fn extract_words(tokens: &[String], timestamps: &[f32], offset: f32, out: &mut Vec<WordTimestamp>) {
+    if tokens.is_empty() || timestamps.is_empty() {
+        return;
+    }
+    // Group subword tokens into words (tokens starting with space = new word)
+    let mut current_word = String::new();
+    let mut word_start: f32 = 0.0;
+    let mut word_end: f32 = 0.0;
+
+    for (i, token) in tokens.iter().enumerate() {
+        let t = timestamps.get(i).copied().unwrap_or(0.0);
+        let clean = token.replace('▁', " ");
+        let clean = clean.trim_matches(|c: char| c == '<' || c == '>');
+
+        if clean.is_empty() || clean == "sos" || clean == "eos" || clean == "eot" {
+            continue;
+        }
+
+        let starts_new_word = token.starts_with('▁') || token.starts_with(' ') || current_word.is_empty();
+        if starts_new_word && !current_word.is_empty() {
+            let w = current_word.trim().to_string();
+            if !w.is_empty() {
+                out.push(WordTimestamp { word: w, start: word_start + offset, end: word_end + offset });
+            }
+            current_word.clear();
+            word_start = t;
+        }
+        if current_word.is_empty() {
+            word_start = t;
+        }
+        current_word.push_str(clean.trim());
+        word_end = t;
+    }
+
+    if !current_word.is_empty() {
+        let w = current_word.trim().to_string();
+        if !w.is_empty() {
+            out.push(WordTimestamp { word: w, start: word_start + offset, end: word_end + offset });
+        }
+    }
 }
 
 pub(crate) fn maybe_punctuate(

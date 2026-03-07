@@ -34,7 +34,6 @@ struct LanguageInfo {
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let mut languages = HashMap::new();
     let en_ready = state.models.en.is_some();
-    // Moonshine v2 supports 7 languages via the same recognizer
     for lang in ["ar", "en", "es", "ja", "uk", "vi", "zh"] {
         languages.insert(lang, LanguageInfo {
             model: "moonshine-v2-base",
@@ -88,49 +87,60 @@ pub async fn transcribe_json(
     Json(req): Json<TranscribeRequest>,
 ) -> Json<TranscribeResponse> {
     let language = normalize_language(&req.language);
-    let path = Path::new(&req.audio_path);
+    let audio_path = req.audio_path.clone();
+    let vad = req.vad;
+    let punctuate = req.punctuate;
+    let max_chunk_len = req.max_chunk_len;
 
-    match transcribe::transcribe(
-        &state.models, &state.config, path, &language,
-        req.vad, req.punctuate, req.max_chunk_len,
-    ) {
-        Ok(result) => Json(TranscribeResponse {
-            text: result.text,
-            chunks: result.chunks,
-            duration_ms: result.duration_ms,
-            speech_ms: result.speech_ms,
-            error: None,
-        }),
-        Err(e) => Json(TranscribeResponse {
-            text: String::new(),
-            chunks: Vec::new(),
-            duration_ms: 0.0,
-            speech_ms: 0.0,
-            error: Some(e.to_string()),
-        }),
-    }
+    let result = tokio::task::spawn_blocking(move || {
+        transcribe::transcribe(
+            &state.models, &state.config, Path::new(&audio_path), &language,
+            vad, punctuate, max_chunk_len,
+        )
+    }).await.unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
+
+    to_response(result)
 }
 
 pub async fn transcribe_upload(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Json<TranscribeResponse> {
-    match handle_upload(&state, &mut multipart).await {
-        Ok(resp) => Json(resp),
+    match parse_upload(&mut multipart).await {
+        Ok(upload) => {
+            let path = upload.file_path;
+            let language = upload.language;
+            let vad = upload.vad;
+            let punctuate = upload.punctuate;
+            let max_chunk_len = upload.max_chunk_len;
+            let p = path.clone();
+
+            let result = tokio::task::spawn_blocking(move || {
+                transcribe::transcribe(
+                    &state.models, &state.config, &p, &language,
+                    vad, punctuate, max_chunk_len,
+                )
+            }).await.unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
+
+            let _ = std::fs::remove_file(&path);
+            to_response(result)
+        }
         Err(msg) => Json(TranscribeResponse {
-            text: String::new(),
-            chunks: Vec::new(),
-            duration_ms: 0.0,
-            speech_ms: 0.0,
-            error: Some(msg),
+            text: String::new(), chunks: Vec::new(),
+            duration_ms: 0.0, speech_ms: 0.0, error: Some(msg),
         }),
     }
 }
 
-async fn handle_upload(
-    state: &AppState,
-    multipart: &mut Multipart,
-) -> Result<TranscribeResponse, String> {
+struct UploadData {
+    file_path: std::path::PathBuf,
+    language: String,
+    vad: Option<bool>,
+    max_chunk_len: usize,
+    punctuate: Option<bool>,
+}
+
+async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData, String> {
     let mut file_path: Option<std::path::PathBuf> = None;
     let mut language = "en".to_string();
     let mut vad: Option<bool> = None;
@@ -140,7 +150,7 @@ async fn handle_upload(
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
-            "file" => {
+            "file" | "audio" => {
                 let ext = field.file_name()
                     .and_then(|n| Path::new(n).extension().map(|e| e.to_string_lossy().to_string()))
                     .unwrap_or_else(|| "wav".to_string());
@@ -149,48 +159,30 @@ async fn handle_upload(
                 std::fs::write(&tmp, &data).map_err(|e: std::io::Error| e.to_string())?;
                 file_path = Some(std::path::PathBuf::from(tmp));
             }
-            "language" => {
-                language = field.text().await.unwrap_or_default();
-            }
-            "vad" => {
-                let v = field.text().await.unwrap_or_default();
-                vad = v.parse().ok();
-            }
-            "max_chunk_len" => {
-                let v = field.text().await.unwrap_or_default();
-                max_chunk_len = v.parse().unwrap_or(0);
-            }
-            "punctuate" => {
-                let v = field.text().await.unwrap_or_default();
-                punctuate = v.parse().ok();
-            }
+            "language" => language = field.text().await.unwrap_or_default(),
+            "vad" => vad = field.text().await.unwrap_or_default().parse().ok(),
+            "max_chunk_len" => max_chunk_len = field.text().await.unwrap_or_default().parse().unwrap_or(0),
+            "punctuate" => punctuate = field.text().await.unwrap_or_default().parse().ok(),
             _ => {}
         }
     }
 
-    let path = file_path.ok_or("missing 'file' field")?;
-    let language = normalize_language(&language);
+    Ok(UploadData {
+        file_path: file_path.ok_or("missing 'file' or 'audio' field")?,
+        language: normalize_language(&language),
+        vad, max_chunk_len, punctuate,
+    })
+}
 
-    let result = transcribe::transcribe(
-        &state.models, &state.config, &path, &language,
-        vad, punctuate, max_chunk_len,
-    );
-
-    let _ = std::fs::remove_file(&path);
+fn to_response(result: Result<transcribe::TranscribeResult, transcribe::TranscribeError>) -> Json<TranscribeResponse> {
     match result {
-        Ok(r) => Ok(TranscribeResponse {
-            text: r.text,
-            chunks: r.chunks,
-            duration_ms: r.duration_ms,
-            speech_ms: r.speech_ms,
-            error: None,
+        Ok(r) => Json(TranscribeResponse {
+            text: r.text, chunks: r.chunks,
+            duration_ms: r.duration_ms, speech_ms: r.speech_ms, error: None,
         }),
-        Err(e) => Ok(TranscribeResponse {
-            text: String::new(),
-            chunks: Vec::new(),
-            duration_ms: 0.0,
-            speech_ms: 0.0,
-            error: Some(e.to_string()),
+        Err(e) => Json(TranscribeResponse {
+            text: String::new(), chunks: Vec::new(),
+            duration_ms: 0.0, speech_ms: 0.0, error: Some(e.to_string()),
         }),
     }
 }

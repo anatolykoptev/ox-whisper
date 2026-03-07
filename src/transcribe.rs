@@ -83,6 +83,10 @@ fn do_transcribe(
         if let Some(ref vad_mutex) = models.vad {
             let mut vad = vad_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
             let vad_result = apply_vad(&mut vad, &samples, 16000);
+            let total_ms = duration * 1000.0;
+            let pct = if total_ms > 0.0 { 100.0 * vad_result.speech_ms / total_ms } else { 0.0 };
+            tracing::info!("VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} chunk(s)",
+                vad_result.speech_ms, total_ms, pct, vad_result.chunks.len());
             (vad_result.chunks, vad_result.speech_ms)
         } else {
             (split_audio_chunks(samples, 16000), 0.0)
@@ -164,7 +168,7 @@ fn maybe_punctuate(
 ) -> String {
     let should_punctuate = match punctuate_override {
         Some(v) => v,
-        None => language != "ru" && models.punct.is_some(),
+        None => language == "en" && models.punct.is_some(),
     };
     if should_punctuate {
         if let Some(ref punct_mutex) = models.punct {

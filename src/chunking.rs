@@ -1,7 +1,15 @@
-/// Remove null bytes from text.
-/// In Rust, `&str` is always valid UTF-8, so only null bytes need filtering.
+/// Sanitize transcription output: remove null bytes, collapse whitespace,
+/// strip leading/trailing punctuation artifacts from model output.
 pub fn sanitize_utf8(text: &str) -> String {
-    text.replace('\0', "")
+    let mut result = text.replace('\0', "");
+    // Collapse multiple spaces into one
+    while result.contains("  ") {
+        result = result.replace("  ", " ");
+    }
+    // Remove leading punctuation (common model artifact)
+    result = result.trim_start_matches(|c: char| c == ',' || c == '.' || c == ' ').to_string();
+    result = result.trim().to_string();
+    result
 }
 
 /// Find the best split point within `text[..max_len]` using priority:

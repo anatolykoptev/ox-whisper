@@ -113,8 +113,7 @@ async fn do_transcribe(
 async fn do_transcribe_interim(
     state: &Arc<AppState>, session: &mut WsSession, params: &WsParams,
 ) -> Option<ServerMessage> {
-    // Clone buffer for interim — don't consume it
-    let samples = session.take_buffer();
+    let samples = session.peek_buffer();
     if samples.is_empty() { return None; }
     let (text, words) = transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
     Some(session.interim_result(text, words))

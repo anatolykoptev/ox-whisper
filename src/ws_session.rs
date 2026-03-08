@@ -42,9 +42,14 @@ impl WsSession {
         self.last_interim_samples = self.total_samples;
     }
 
-    /// Take the accumulated audio buffer for transcription.
+    /// Take the accumulated audio buffer for transcription (destructive).
     pub fn take_buffer(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.buffer)
+    }
+
+    /// Clone the current buffer for interim transcription (non-destructive).
+    pub fn peek_buffer(&self) -> Vec<f32> {
+        self.buffer.clone()
     }
 
     /// Current timestamp in seconds based on total samples received.
@@ -53,10 +58,17 @@ impl WsSession {
     }
 
     /// Run VAD on the current buffer. Returns server messages and whether speech ended.
+    /// Only triggers speech_final when we have >= 1s of audio and VAD found segments.
     pub fn run_vad_check(
         &mut self, models: &Models, config: &Config,
     ) -> (Vec<ServerMessage>, bool) {
         let mut messages = Vec::new();
+
+        // Need at least 1s of audio for meaningful VAD
+        if self.buffer.len() < self.sample_rate as usize {
+            return (messages, false);
+        }
+
         let vad_mutex = match models.vad {
             Some(ref v) => v,
             None => return (messages, false),
@@ -75,17 +87,18 @@ impl WsSession {
 
         if has_speech && !self.speech_detected {
             self.speech_detected = true;
-            messages.push(ServerMessage::SpeechStarted {
-                timestamp_s: self.timestamp_s(),
-            });
+            let offset = (self.total_samples - self.buffer.len()) as f64 / self.sample_rate as f64;
+            messages.push(ServerMessage::SpeechStarted { timestamp_s: offset });
         }
 
-        // Speech final = VAD found speech followed by silence
-        let speech_final = self.speech_detected
-            && result.chunks.len() >= 1
-            && result.speech_ms > 0.0;
+        // Speech final = VAD found speech AND speech portion is shorter than buffer
+        // (meaning there's trailing silence — utterance ended)
+        let speech_samples: usize = result.chunks.iter().map(|c| c.len()).sum();
+        let speech_final = has_speech && speech_samples < self.buffer.len() * 9 / 10;
 
         if speech_final {
+            // Replace buffer with just the speech chunks for cleaner transcription
+            self.buffer = result.chunks.into_iter().flatten().collect();
             self.speech_detected = false;
         }
 

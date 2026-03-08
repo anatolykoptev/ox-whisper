@@ -21,10 +21,6 @@ impl<T> Pool<T> {
         })
     }
 
-    pub fn size(&self) -> usize {
-        self.items.lock().map(|v| v.len()).unwrap_or(0)
-    }
-
     fn return_item(&self, item: T) {
         if let Ok(mut items) = self.items.lock() {
             items.push(item);

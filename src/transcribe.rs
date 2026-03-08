@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::models::Models;
 use crate::punctuate::add_punctuation;
 use crate::vad::apply_vad;
-use crate::words::{WordTimestamp, compute_chunk_offsets, extract_words, extract_words_with_confidence};
+use crate::words::{WordTimestamp, compute_chunk_offsets, extract_words_with_confidence};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranscribeError {
@@ -87,12 +87,14 @@ fn do_transcribe(
     let joined = texts.join(" ");
     let text = sanitize_utf8(joined.trim());
 
-    // Skip external punctuation if RU model has built-in punct (GigaAM v3 transducer)
-    let has_builtin = language == "ru" && models.ru.as_ref()
+    // Skip external punctuation for:
+    // - EN: Moonshine v2 produces punctuated text natively (tokens include , . etc)
+    // - RU with GigaAM v3 transducer: has built-in punctuation
+    let skip_punct = language != "ru" || models.ru.as_ref()
         .and_then(|p| p.acquire())
         .map(|r| r.has_builtin_punct())
         .unwrap_or(false);
-    let text = if has_builtin {
+    let text = if skip_punct {
         text
     } else {
         maybe_punctuate(models, &text, language, punctuate_override)
@@ -117,7 +119,22 @@ fn transcribe_en(
         let ratio = compression_ratio(&text);
         let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
         if text.is_empty() {
-            tracing::debug!("EN chunk {}: empty ({} samples)", i, chunk.len());
+            // Moonshine sometimes returns empty on longer chunks — retry by splitting in half
+            if chunk.len() > 32000 {
+                let mid = chunk.len() / 2;
+                for (j, half) in [&chunk[..mid], &chunk[mid..]].iter().enumerate() {
+                    let retry = rec.transcribe(16000, half);
+                    let rt = retry.text.trim().to_string();
+                    if !rt.is_empty() && compression_ratio(&rt) <= threshold {
+                        let half_offset = offset + if j == 1 { mid as f32 / 16000.0 } else { 0.0 };
+                        extract_words_with_confidence(&retry.tokens, &retry.timestamps, &retry.log_probs, half_offset, &mut words);
+                        texts.push(rt);
+                    }
+                }
+                tracing::info!("EN chunk {}: empty, retried as 2 halves", i);
+            } else {
+                tracing::debug!("EN chunk {}: empty ({} samples)", i, chunk.len());
+            }
         } else if ratio > threshold {
             // Retry with trimmed audio (drop 5% from edges to shift alignment)
             let trim = chunk.len() / 20;

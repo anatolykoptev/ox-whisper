@@ -26,15 +26,6 @@ pub fn compute_chunk_offsets(chunks: &[Vec<f32>], sample_rate: u32) -> Vec<f64> 
 /// Special tokens (sos, eos, eot) are skipped. Each word gets
 /// the start time of its first token and end time of its last token,
 /// shifted by the chunk offset.
-pub fn extract_words(
-    tokens: &[String],
-    timestamps: &[f32],
-    offset: f32,
-    out: &mut Vec<WordTimestamp>,
-) {
-    extract_words_with_confidence(tokens, timestamps, &[], offset, out);
-}
-
 pub fn extract_words_with_confidence(
     tokens: &[String],
     timestamps: &[f32],

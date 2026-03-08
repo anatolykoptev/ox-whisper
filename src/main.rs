@@ -19,6 +19,7 @@ mod pii;
 mod pool;
 mod punctuate;
 mod recognizer;
+mod smart_format;
 mod spelling;
 mod streaming;
 mod transcribe;

@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build via Docker (aarch64)
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --target builder \
+            --output type=local,dest=./out \
+            .
+
+      - name: Package binary + shared libs
+        run: |
+          mkdir -p dist/ox-whisper
+          cp out/app/target/release/ox-whisper dist/ox-whisper/
+          cp out/app/vendor/sherpa-onnx/lib/libsherpa-onnx-c-api.so dist/ox-whisper/
+          cp out/app/vendor/sherpa-onnx/lib/libsherpa-onnx-cxx-api.so dist/ox-whisper/
+          cp out/app/vendor/sherpa-onnx/lib/libonnxruntime.so dist/ox-whisper/
+          cd dist && tar czf ../ox-whisper-linux-aarch64.tar.gz ox-whisper/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ox-whisper-linux-aarch64
+          path: ox-whisper-linux-aarch64.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s" HEAD)
+          else
+            COMMITS=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD")
+          fi
+
+          FEATURES=$(echo "$COMMITS" | grep -i "^- feat" || true)
+          FIXES=$(echo "$COMMITS" | grep -i "^- fix" || true)
+          OTHER=$(echo "$COMMITS" | grep -iv "^- feat\|^- fix\|^- docs\|^- test\|^- ci\|^- chore" || true)
+
+          {
+            echo "body<<CHANGELOG_EOF"
+            if [ -n "$FEATURES" ]; then
+              echo "### Features"
+              echo "$FEATURES"
+              echo ""
+            fi
+            if [ -n "$FIXES" ]; then
+              echo "### Bug Fixes"
+              echo "$FIXES"
+              echo ""
+            fi
+            if [ -n "$OTHER" ]; then
+              echo "### Other"
+              echo "$OTHER"
+              echo ""
+            fi
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.changelog.outputs.body }}
+          files: |
+            ox-whisper-linux-aarch64/ox-whisper-linux-aarch64.tar.gz

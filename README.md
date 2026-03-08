@@ -4,16 +4,42 @@ Speech-to-text HTTP server. 8 languages, Silero VAD, word timestamps, punctuatio
 
 Built on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) v1.12.28 (Rust + axum).
 
+## Languages
+
+| Code | Language | Model |
+|------|----------|-------|
+| `en` | English | Moonshine v2 Base |
+| `ru` | Russian | Zipformer INT8 / GigaAM v3 |
+| `ar` | Arabic | Moonshine v2 Base |
+| `es` | Spanish | Moonshine v2 Base |
+| `ja` | Japanese | Moonshine v2 Base |
+| `uk` | Ukrainian | Moonshine v2 Base |
+| `vi` | Vietnamese | Moonshine v2 Base |
+| `zh` | Chinese | Moonshine v2 Base |
+
 ## Benchmark
 
-ARM64 (Oracle Cloud A1), 4 threads, CPU:
+ARM64 (Oracle Cloud A1), 4 threads, CPU only. Best of 3 runs after warmup.
 
-| Audio | Latency | RTF |
-|-------|---------|-----|
-| RU 7s | 200ms | 0.03 |
-| RU 9s | 280ms | 0.03 |
-| EN 9s | 230ms | 0.03 |
-| RU 2min (VAD, 44s speech) | 2.5s | 0.06 |
+**Short audio (7-9s):**
+
+| Language | Model | 9.2s audio | 7.1s audio |
+|----------|-------|-----------|-----------|
+| EN | Moonshine v2 | 215ms | 549ms |
+| RU | Zipformer | 338ms | 461ms |
+| AR | Moonshine v2 | 195ms | 586ms |
+| ES | Moonshine v2 | 190ms | 636ms |
+| JA | Moonshine v2 | 207ms | 382ms |
+| UK | Moonshine v2 | 184ms | 450ms |
+| VI | Moonshine v2 | 221ms | 406ms |
+| ZH | Moonshine v2 | 164ms | 498ms |
+
+**Long audio (123s, VAD enabled, 44s speech):**
+
+| Language | Latency | RTF |
+|----------|---------|-----|
+| EN | 2.0s | 0.05 |
+| RU | 2.4s | 0.06 |
 
 Dockerfile applies ORT graph optimizations (`ORT_ENABLE_ALL`) — ~4x speedup for Moonshine, ~30% for Zipformer.
 

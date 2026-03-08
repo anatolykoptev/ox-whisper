@@ -5,6 +5,8 @@ pub struct WordTimestamp {
     pub word: String,
     pub start: f32,
     pub end: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
 }
 
 /// Compute the time offset (in seconds) of each audio chunk.
@@ -30,6 +32,16 @@ pub fn extract_words(
     offset: f32,
     out: &mut Vec<WordTimestamp>,
 ) {
+    extract_words_with_confidence(tokens, timestamps, &[], offset, out);
+}
+
+pub fn extract_words_with_confidence(
+    tokens: &[String],
+    timestamps: &[f32],
+    log_probs: &[f32],
+    offset: f32,
+    out: &mut Vec<WordTimestamp>,
+) {
     if tokens.is_empty() || timestamps.is_empty() {
         return;
     }
@@ -37,6 +49,7 @@ pub fn extract_words(
     let mut current_word = String::new();
     let mut word_start: f32 = 0.0;
     let mut word_end: f32 = 0.0;
+    let mut word_log_probs: Vec<f32> = Vec::new();
 
     for (i, token) in tokens.iter().enumerate() {
         let t = timestamps.get(i).copied().unwrap_or(0.0);
@@ -58,9 +71,11 @@ pub fn extract_words(
                     word: w,
                     start: word_start + offset,
                     end: word_end + offset,
+                    confidence: avg_confidence(&word_log_probs),
                 });
             }
             current_word.clear();
+            word_log_probs.clear();
             word_start = t;
         }
         if current_word.is_empty() {
@@ -68,6 +83,9 @@ pub fn extract_words(
         }
         current_word.push_str(clean.trim());
         word_end = t;
+        if let Some(&lp) = log_probs.get(i) {
+            word_log_probs.push(lp);
+        }
     }
 
     if !current_word.is_empty() {
@@ -77,7 +95,16 @@ pub fn extract_words(
                 word: w,
                 start: word_start + offset,
                 end: word_end + offset,
+                confidence: avg_confidence(&word_log_probs),
             });
         }
     }
+}
+
+fn avg_confidence(log_probs: &[f32]) -> Option<f32> {
+    if log_probs.is_empty() {
+        return None;
+    }
+    let avg = log_probs.iter().sum::<f32>() / log_probs.len() as f32;
+    Some(avg.exp())
 }

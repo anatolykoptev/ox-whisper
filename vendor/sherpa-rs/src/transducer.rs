@@ -1,4 +1,3 @@
-use crate::utils::cstr_to_string;
 use crate::{get_default_provider, utils::cstring_from_str};
 use eyre::{bail, Result};
 use std::mem;
@@ -111,7 +110,9 @@ impl TransducerRecognizer {
         Ok(Self { recognizer })
     }
 
-    pub fn transcribe(&mut self, sample_rate: u32, samples: &[f32]) -> String {
+    pub fn transcribe(
+        &mut self, sample_rate: u32, samples: &[f32],
+    ) -> super::OfflineRecognizerResult {
         unsafe {
             let stream = sherpa_rs_sys::SherpaOnnxCreateOfflineStream(self.recognizer);
             sherpa_rs_sys::SherpaOnnxAcceptWaveformOffline(
@@ -123,12 +124,49 @@ impl TransducerRecognizer {
             sherpa_rs_sys::SherpaOnnxDecodeOfflineStream(self.recognizer, stream);
             let result_ptr = sherpa_rs_sys::SherpaOnnxGetOfflineStreamResult(stream);
             let raw_result = result_ptr.read();
-            let text = cstr_to_string(raw_result.text as _);
-
-            // Free
+            let result = super::OfflineRecognizerResult::new(&raw_result);
             sherpa_rs_sys::SherpaOnnxDestroyOfflineRecognizerResult(result_ptr);
             sherpa_rs_sys::SherpaOnnxDestroyOfflineStream(stream);
-            text
+            result
+        }
+    }
+
+    /// Batch-decode multiple audio chunks in parallel via SherpaOnnxDecodeMultipleOfflineStreams.
+    pub fn transcribe_batch(
+        &mut self, sample_rate: u32, chunks: &[&[f32]],
+    ) -> Vec<super::OfflineRecognizerResult> {
+        if chunks.is_empty() {
+            return Vec::new();
+        }
+        unsafe {
+            let mut streams = Vec::with_capacity(chunks.len());
+            for samples in chunks {
+                let stream = sherpa_rs_sys::SherpaOnnxCreateOfflineStream(self.recognizer);
+                sherpa_rs_sys::SherpaOnnxAcceptWaveformOffline(
+                    stream,
+                    sample_rate as i32,
+                    samples.as_ptr(),
+                    samples.len().try_into().unwrap(),
+                );
+                streams.push(stream);
+            }
+            let mut stream_ptrs: Vec<_> = streams.iter().map(|s| *s as *const _).collect();
+            sherpa_rs_sys::SherpaOnnxDecodeMultipleOfflineStreams(
+                self.recognizer,
+                stream_ptrs.as_mut_ptr(),
+                streams.len() as i32,
+            );
+            let mut results = Vec::with_capacity(streams.len());
+            for stream in &streams {
+                let result_ptr = sherpa_rs_sys::SherpaOnnxGetOfflineStreamResult(*stream);
+                let raw = result_ptr.read();
+                results.push(super::OfflineRecognizerResult::new(&raw));
+                sherpa_rs_sys::SherpaOnnxDestroyOfflineRecognizerResult(result_ptr);
+            }
+            for stream in streams {
+                sherpa_rs_sys::SherpaOnnxDestroyOfflineStream(stream);
+            }
+            results
         }
     }
 }

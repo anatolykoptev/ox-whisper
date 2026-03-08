@@ -40,8 +40,17 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             ready: en_ready,
         });
     }
+    let ru_model = if state.models.ru.as_ref()
+        .and_then(|p| p.acquire())
+        .map(|r| r.has_builtin_punct())
+        .unwrap_or(false)
+    {
+        "gigaam-v3-rnnt-punct"
+    } else {
+        "gigaam-v2-ctc"
+    };
     languages.insert("ru", LanguageInfo {
-        model: "gigaam-v2-ctc-int8",
+        model: ru_model,
         ready: state.models.ru.is_some(),
     });
 
@@ -78,6 +87,8 @@ pub struct TranscribeResponse {
     pub speech_ms: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<crate::words::WordTimestamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -130,7 +141,7 @@ pub async fn transcribe_upload(
         Err(msg) => Json(TranscribeResponse {
             text: String::new(), chunks: Vec::new(),
             duration_ms: 0.0, speech_ms: 0.0,
-            words: Vec::new(), error: Some(msg),
+            words: Vec::new(), confidence: None, error: Some(msg),
         }),
     }
 }
@@ -179,15 +190,27 @@ pub(crate) async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData
 
 fn to_response(result: Result<transcribe::TranscribeResult, transcribe::TranscribeError>) -> Json<TranscribeResponse> {
     match result {
-        Ok(r) => Json(TranscribeResponse {
-            text: r.text, chunks: r.chunks,
-            duration_ms: r.duration_ms, speech_ms: r.speech_ms,
-            words: r.words, error: None,
-        }),
+        Ok(r) => {
+            let confidence = {
+                let confs: Vec<f32> = r.words.iter()
+                    .filter_map(|w| w.confidence)
+                    .collect();
+                if confs.is_empty() {
+                    None
+                } else {
+                    Some(confs.iter().sum::<f32>() / confs.len() as f32)
+                }
+            };
+            Json(TranscribeResponse {
+                text: r.text, chunks: r.chunks,
+                duration_ms: r.duration_ms, speech_ms: r.speech_ms,
+                words: r.words, confidence, error: None,
+            })
+        }
         Err(e) => Json(TranscribeResponse {
             text: String::new(), chunks: Vec::new(),
             duration_ms: 0.0, speech_ms: 0.0,
-            words: Vec::new(), error: Some(e.to_string()),
+            words: Vec::new(), confidence: None, error: Some(e.to_string()),
         }),
     }
 }

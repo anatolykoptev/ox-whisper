@@ -1,6 +1,50 @@
 # ox-whisper Performance Experiments
 
-## 2026-03-08: GigaAM v3 Transducer — FAILED
+## 2026-03-08: sherpa-onnx v1.12.28 Update + GigaAM v3 Architecture
+
+### Goal
+
+Update sherpa-onnx from v1.12.9 to v1.12.28 to unlock GigaAM v3 support, add per-word
+confidence scores (`ys_log_probs`), and prepare architecture for GigaAM v3 punct model.
+
+### Changes
+
+1. **sherpa-onnx v1.12.9 → v1.12.28**: Replaced vendored source, rebuilt shared libraries.
+   New C API fields: `durations`, `ys_log_probs`, `segment_timestamps/durations/texts`.
+   New model backends: `wenet_ctc`, `omnilingual`, `medasr`, `funasr_nano`, `fire_red_asr_ctc`.
+
+2. **Per-word confidence scores**: `ys_log_probs` → `log_probs` in `OfflineRecognizerResult` →
+   `extract_words_with_confidence()` → `exp(avg_log_prob)` per word → `confidence` field in API.
+   Works for all offline transducers including current v2 Zipformer.
+
+3. **Transducer `transcribe()` → `OfflineRecognizerResult`**: Previously returned `String`,
+   now returns full result with tokens, timestamps, log_probs. Enables word timestamps for
+   transducer models (not just NeMo CTC).
+
+4. **Built-in punctuation detection**: `has_builtin_punct()` on `RuRecognizer::Transducer`
+   skips external punctuation model for GigaAM v3 (which has native punctuation).
+
+5. **Health endpoint**: Dynamically reports `"gigaam-v3-rnnt-punct"` vs `"gigaam-v2-ctc"`
+   based on loaded model type.
+
+### Results
+
+- EN Moonshine: No regression, transcription works
+- RU v2 Transducer: Word timestamps + confidence scores (0.68–0.96 per word)
+- Session.cc optimizations: Same sed patterns work on v1.12.28 (unchanged from v1.12.9)
+- GigaAM v3 model not yet tested (requires model download)
+
+### GigaAM v3 Model Info
+
+- Punct variant: `csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16`
+  - vocab_size = 513 tokens, feature_dim = 64 mel filters
+  - WER 8.4% average (vs ~12% v2 CTC, vs 25.1% Whisper)
+  - Built-in punctuation (no external punct model needed)
+- Non-punct variant: vocab_size = 1025, same architecture
+
+---
+
+## 2026-03-08: GigaAM v3 Transducer — FAILED (pre-update attempt)
 
 ### Goal
 

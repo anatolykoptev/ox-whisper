@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::models::Models;
 use crate::punctuate::add_punctuation;
 use crate::vad::apply_vad;
-use crate::words::{WordTimestamp, compute_chunk_offsets, extract_words};
+use crate::words::{WordTimestamp, compute_chunk_offsets, extract_words, extract_words_with_confidence};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranscribeError {
@@ -78,13 +78,23 @@ fn do_transcribe(
 
     let chunk_offsets = compute_chunk_offsets(&audio_chunks, 16000);
     let (texts, words) = match language {
-        "ru" => (transcribe_ru(models, &audio_chunks)?, Vec::new()),
+        "ru" => transcribe_ru(models, &audio_chunks, &chunk_offsets)?,
         _ => transcribe_en(models, &audio_chunks, language, &chunk_offsets)?,
     };
 
     let joined = texts.join(" ");
     let text = sanitize_utf8(joined.trim());
-    let text = maybe_punctuate(models, &text, language, punctuate_override);
+
+    // Skip external punctuation if RU model has built-in punct (GigaAM v3 transducer)
+    let has_builtin = language == "ru" && models.ru.as_ref()
+        .and_then(|p| p.acquire())
+        .map(|r| r.has_builtin_punct())
+        .unwrap_or(false);
+    let text = if has_builtin {
+        text
+    } else {
+        maybe_punctuate(models, &text, language, punctuate_override)
+    };
     let chunks = if max_chunk_len > 0 { split_text(&text, max_chunk_len) } else { Vec::new() };
 
     Ok(TranscribeResult { text, chunks, duration_ms: 0.0, speech_ms, words })
@@ -113,33 +123,43 @@ fn transcribe_en(
                 let rt = retry.text.trim().to_string();
                 if !rt.is_empty() && compression_ratio(&rt) <= 2.4 {
                     tracing::info!("EN chunk {}: retry ok (ratio {:.2} -> ok)", i, ratio);
-                    extract_words(&retry.tokens, &retry.timestamps, offset, &mut words);
+                    extract_words_with_confidence(&retry.tokens, &retry.timestamps, &retry.log_probs, offset, &mut words);
                     texts.push(rt);
                     continue;
                 }
             }
             tracing::warn!("EN chunk {}: ratio {:.2}, skip: {:?}", i, ratio, &text[..text.len().min(80)]);
         } else {
-            extract_words(&result.tokens, &result.timestamps, offset, &mut words);
+            extract_words_with_confidence(&result.tokens, &result.timestamps, &result.log_probs, offset, &mut words);
             texts.push(text);
         }
     }
     Ok((texts, words))
 }
 
-fn transcribe_ru(models: &Models, chunks: &[Vec<f32>]) -> Result<Vec<String>, TranscribeError> {
+fn transcribe_ru(
+    models: &Models, chunks: &[Vec<f32>], chunk_offsets: &[f64],
+) -> Result<(Vec<String>, Vec<WordTimestamp>), TranscribeError> {
     let pool = models.ru.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
     let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
     let chunk_refs: Vec<&[f32]> = chunks.iter().map(|c| c.as_slice()).collect();
-    let raw_texts = rec.transcribe_batch(16000, &chunk_refs);
-    let texts = raw_texts.into_iter()
-        .filter_map(|t| {
-            let t = t.trim().to_string();
-            if !t.is_empty() && compression_ratio(&t) <= 2.4 { Some(t) } else { None }
-        })
-        .collect();
-    Ok(texts)
+    let results = rec.transcribe_batch(16000, &chunk_refs);
+
+    let mut texts = Vec::new();
+    let mut words = Vec::new();
+    for (i, r) in results.into_iter().enumerate() {
+        let t = r.text.trim().to_string();
+        if t.is_empty() || compression_ratio(&t) > 2.4 { continue; }
+        let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
+
+        if !r.timestamps.is_empty() {
+            extract_words_with_confidence(&r.tokens, &r.timestamps, &r.log_probs, offset, &mut words);
+        }
+
+        texts.push(t);
+    }
+    Ok((texts, words))
 }
 
 pub(crate) fn maybe_punctuate(

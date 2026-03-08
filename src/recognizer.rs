@@ -1,5 +1,6 @@
 /// Unified recognizer enum wrapping different sherpa-onnx backends for RU.
 
+use sherpa_rs::OfflineRecognizerResult;
 use sherpa_rs::nemo_ctc::NemoCtcRecognizer;
 use sherpa_rs::transducer::TransducerRecognizer;
 
@@ -9,25 +10,22 @@ pub enum RuRecognizer {
 }
 
 impl RuRecognizer {
-    pub fn transcribe(&mut self, sample_rate: u32, samples: &[f32]) -> String {
+    pub fn transcribe(&mut self, sample_rate: u32, samples: &[f32]) -> OfflineRecognizerResult {
         match self {
             Self::Transducer(r) => r.transcribe(sample_rate, samples),
-            Self::NemoCtc(r) => r.transcribe(sample_rate, samples).text,
+            Self::NemoCtc(r) => r.transcribe(sample_rate, samples),
         }
     }
 
-    /// Batch-decode multiple chunks. Falls back to sequential for Transducer.
-    pub fn transcribe_batch(&mut self, sample_rate: u32, chunks: &[&[f32]]) -> Vec<String> {
+    pub fn transcribe_batch(&mut self, sample_rate: u32, chunks: &[&[f32]]) -> Vec<OfflineRecognizerResult> {
         match self {
-            Self::NemoCtc(r) => {
-                r.transcribe_batch(sample_rate, chunks)
-                    .into_iter()
-                    .map(|r| r.text)
-                    .collect()
-            }
-            Self::Transducer(r) => {
-                chunks.iter().map(|c| r.transcribe(sample_rate, c)).collect()
-            }
+            Self::NemoCtc(r) => r.transcribe_batch(sample_rate, chunks),
+            Self::Transducer(r) => r.transcribe_batch(sample_rate, chunks),
         }
+    }
+
+    /// Returns true if the model produces punctuated text natively (GigaAM v3 transducer).
+    pub fn has_builtin_punct(&self) -> bool {
+        matches!(self, Self::Transducer(_))
     }
 }

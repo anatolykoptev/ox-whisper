@@ -97,7 +97,8 @@ fn transcribe_ru_streaming(
     let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
     let mut texts = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
-        let text = rec.transcribe(16000, chunk).trim().to_string();
+        let result = rec.transcribe(16000, chunk);
+        let text = result.text.trim().to_string();
         if !text.is_empty() && compression_ratio(&text) <= 2.4 {
             let _ = tx.blocking_send(StreamEvent {
                 chunk_index: i, total_chunks: total, text: text.clone(),

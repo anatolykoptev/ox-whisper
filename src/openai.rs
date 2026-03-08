@@ -18,6 +18,8 @@ pub enum ResponseFormat {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct JsonResponse {
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -45,6 +47,8 @@ pub struct VerboseJsonResponse {
     pub words: Vec<Word>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language_confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
 }
 
 /// Group word timestamps into segments of up to `WORDS_PER_SEGMENT` words.
@@ -121,6 +125,7 @@ mod tests {
     fn json_response_serialize() {
         let resp = JsonResponse {
             text: "hello world".to_string(),
+            extra: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["text"], "hello world");
@@ -135,6 +140,7 @@ mod tests {
             segments: vec![],
             words: vec![],
             language_confidence: None,
+            extra: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("words"));
@@ -150,8 +156,34 @@ mod tests {
             segments: vec![],
             words: vec![],
             language_confidence: Some(0.8),
+            extra: None,
         };
         let json: serde_json::Value = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["language_confidence"], 0.8);
+    }
+
+    #[test]
+    fn json_response_includes_extra() {
+        let resp = JsonResponse {
+            text: "hi".to_string(),
+            extra: Some(serde_json::json!({"job_id": "123"})),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["extra"]["job_id"], "123");
+    }
+
+    #[test]
+    fn verbose_response_omits_null_extra() {
+        let resp = VerboseJsonResponse {
+            text: "hi".to_string(),
+            language: "en".to_string(),
+            duration: 1.0,
+            language_confidence: None,
+            segments: vec![],
+            words: vec![],
+            extra: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json.get("extra").is_none());
     }
 }

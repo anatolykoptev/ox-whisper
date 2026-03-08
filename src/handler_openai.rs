@@ -55,7 +55,7 @@ pub async fn transcriptions(
                 r.text = crate::spelling::apply_spelling(&r.text, &upload.custom_spelling);
                 crate::spelling::apply_spelling_to_words(&mut r.words, &upload.custom_spelling);
             }
-            format_response(format, &r, &detected_lang, want_words, lang_confidence)
+            format_response(format, &r, &detected_lang, want_words, lang_confidence, upload.extra)
         }
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -92,6 +92,7 @@ struct OpenAIUpload {
     response_format: ResponseFormat,
     want_words: bool,
     custom_spelling: Vec<crate::spelling::SpellingRule>,
+    extra: Option<serde_json::Value>,
 }
 
 async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, String> {
@@ -100,6 +101,7 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
     let mut response_format = ResponseFormat::default();
     let mut want_words = false;
     let mut custom_spelling = Vec::new();
+    let mut extra: Option<serde_json::Value> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
@@ -134,6 +136,12 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
                     custom_spelling = rules;
                 }
             }
+            "extra" => {
+                let val = field.text().await.unwrap_or_default();
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&val) {
+                    extra = Some(parsed);
+                }
+            }
             // model, temperature, prompt — accepted but ignored
             _ => { let _ = field.bytes().await; }
         }
@@ -145,6 +153,7 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
         response_format,
         want_words,
         custom_spelling,
+        extra,
     })
 }
 
@@ -178,10 +187,11 @@ fn format_response(
     language: &str,
     want_words: bool,
     language_confidence: Option<f64>,
+    extra: Option<serde_json::Value>,
 ) -> Response {
     match format {
         ResponseFormat::Json => {
-            let body = JsonResponse { text: result.text.clone() };
+            let body = JsonResponse { text: result.text.clone(), extra };
             axum::Json(body).into_response()
         }
         ResponseFormat::VerboseJson => {
@@ -195,6 +205,7 @@ fn format_response(
                 segments,
                 words,
                 language_confidence,
+                extra,
             };
             axum::Json(body).into_response()
         }

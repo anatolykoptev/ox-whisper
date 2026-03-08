@@ -40,15 +40,10 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             ready: en_ready,
         });
     }
-    let ru_model = if state.models.ru.as_ref()
+    let ru_model = state.models.ru.as_ref()
         .and_then(|p| p.acquire())
-        .map(|r| r.has_builtin_punct())
-        .unwrap_or(false)
-    {
-        "gigaam-v3-rnnt-punct"
-    } else {
-        "gigaam-v2-ctc"
-    };
+        .map(|r| r.model_name())
+        .unwrap_or("none");
     languages.insert("ru", LanguageInfo {
         model: ru_model,
         ready: state.models.ru.is_some(),

@@ -53,7 +53,7 @@ fn do_transcribe(
     vad_override: Option<bool>, punctuate_override: Option<bool>, max_chunk_len: usize,
 ) -> Result<TranscribeResult, TranscribeError> {
     let (samples, duration) = load_wav(wav_path)?;
-    if duration > config.max_audio_duration_s {
+    if config.max_audio_duration_s > 0.0 && duration > config.max_audio_duration_s {
         return Err(TranscribeError::TooLong(duration, config.max_audio_duration_s));
     }
 
@@ -167,7 +167,7 @@ pub(crate) fn maybe_punctuate(
 ) -> String {
     let should = match punctuate_override {
         Some(v) => v,
-        None => language == "en" && models.punct.is_some(),
+        None => (language == "en" || language == "ru") && models.punct.is_some(),
     };
     if should {
         if let Some(ref m) = models.punct {
@@ -177,7 +177,8 @@ pub(crate) fn maybe_punctuate(
     text.to_string()
 }
 
-const MAX_CHUNK_SAMPLES: usize = 5 * 16000;
+const MAX_CHUNK_SECONDS: usize = 20;
+const MAX_CHUNK_SAMPLES: usize = MAX_CHUNK_SECONDS * 16000;
 
 pub(crate) fn split_audio_chunks(samples: Vec<f32>, _sample_rate: u32) -> Vec<Vec<f32>> {
     if samples.len() <= MAX_CHUNK_SAMPLES {

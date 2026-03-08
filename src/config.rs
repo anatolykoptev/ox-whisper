@@ -18,7 +18,7 @@ pub struct Config {
     pub num_threads: i32,
     /// Minimum VAD segment duration in seconds (VAD_MIN_DURATION_S, default: 10.0)
     pub vad_min_duration_s: f64,
-    /// Maximum audio duration in seconds (MAX_AUDIO_DURATION_S, default: 300.0)
+    /// Maximum audio duration in seconds (MAX_AUDIO_DURATION_S, default: 0 = no limit)
     pub max_audio_duration_s: f64,
     /// Number of recognizer instances per model (POOL_SIZE, default: 2)
     pub pool_size: usize,
@@ -61,7 +61,7 @@ impl Config {
             max_audio_duration_s: env::var("MAX_AUDIO_DURATION_S")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(300.0),
+                .unwrap_or(0.0),
             pool_size: env::var("POOL_SIZE")
                 .ok()
                 .and_then(|v| v.parse().ok())

@@ -130,6 +130,7 @@ fn load_nemo_ctc(config: &Config, model: &str, tokens: &str) -> Option<Pool<RuRe
 
 fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecognizer>> {
     let model_type = detect_transducer_type(encoder_path);
+    let is_nemo = model_type == "nemo_transducer";
     let decoder_path = find_model_file(&config.ru_models_dir, "decoder");
     let joiner_path = find_model_file(&config.ru_models_dir, "joiner");
     let transducer_cfg = TransducerConfig {
@@ -146,11 +147,17 @@ fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecogniz
     for i in 0..config.pool_size {
         match TransducerRecognizer::new(transducer_cfg.clone()) {
             Ok(r) => {
-                tracing::info!("RU Transducer ({}) {}/{} loaded", transducer_cfg.model_type, i + 1, config.pool_size);
-                recognizers.push(RuRecognizer::Transducer(r));
+                let variant = if is_nemo { "NeMo GigaAM v3" } else { "Zipformer" };
+                tracing::info!("RU {} ({}) {}/{} loaded", variant, transducer_cfg.model_type, i + 1, config.pool_size);
+                let rec = if is_nemo {
+                    RuRecognizer::NemoTransducer(r)
+                } else {
+                    RuRecognizer::Transducer(r)
+                };
+                recognizers.push(rec);
             }
             Err(e) => {
-                tracing::error!("RU Zipformer {}/{} failed: {}", i + 1, config.pool_size, e);
+                tracing::error!("RU Transducer {}/{} failed: {}", i + 1, config.pool_size, e);
                 break;
             }
         }
@@ -190,7 +197,8 @@ fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {
         min_silence_duration: config.vad_min_silence_s, min_speech_duration: 0.25,
         window_size: 512, ..Default::default()
     };
-    match SileroVad::new(cfg, config.max_audio_duration_s as f32) {
+    let vad_max = if config.max_audio_duration_s > 0.0 { config.max_audio_duration_s } else { 3600.0 };
+    match SileroVad::new(cfg, vad_max as f32) {
         Ok(v) => { tracing::info!("VAD loaded from {}", config.vad_model); Some(Mutex::new(v)) }
         Err(e) => { tracing::error!("VAD load failed: {}", e); None }
     }

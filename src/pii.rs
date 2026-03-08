@@ -31,9 +31,12 @@ pub enum RedactFormat {
 pub struct PiiRedactor {
     phone_us: Regex,
     phone_ru: Regex,
+    phone_continuous: Regex,
     email: Regex,
     ssn: Regex,
+    ssn_continuous: Regex,
     credit_card: Regex,
+    credit_card_continuous: Regex,
     ipv4: Regex,
 }
 
@@ -42,9 +45,12 @@ impl PiiRedactor {
         Self {
             phone_us: Regex::new(r"(?:\+1[\s.\-]?|\b)\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b").unwrap(),
             phone_ru: Regex::new(r"(?:\+7|8)[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{2}[\s.\-]?\d{2}").unwrap(),
+            phone_continuous: Regex::new(r"\b\d{10,11}\b").unwrap(),
             email: Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}").unwrap(),
             ssn: Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap(),
+            ssn_continuous: Regex::new(r"\b\d{9}\b").unwrap(),
             credit_card: Regex::new(r"\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b").unwrap(),
+            credit_card_continuous: Regex::new(r"\b\d{13,19}\b").unwrap(),
             ipv4: Regex::new(
                 r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b",
             )
@@ -109,10 +115,10 @@ impl PiiRedactor {
 
     fn patterns_for(&self, ty: PiiEntityType) -> Vec<&Regex> {
         match ty {
-            PiiEntityType::Phone => vec![&self.phone_ru, &self.phone_us],
+            PiiEntityType::Phone => vec![&self.phone_ru, &self.phone_us, &self.phone_continuous],
             PiiEntityType::Email => vec![&self.email],
-            PiiEntityType::Ssn => vec![&self.ssn],
-            PiiEntityType::CreditCard => vec![&self.credit_card],
+            PiiEntityType::Ssn => vec![&self.ssn, &self.ssn_continuous],
+            PiiEntityType::CreditCard => vec![&self.credit_card, &self.credit_card_continuous],
             PiiEntityType::IpAddress => vec![&self.ipv4],
         }
     }

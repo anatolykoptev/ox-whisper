@@ -111,6 +111,27 @@ fn mixed_entity_types() {
 }
 
 #[test]
+fn phone_continuous_detected() {
+    let r = PiiRedactor::new();
+    let out = r.redact_text("my number is 12125550123", &[PiiEntityType::Phone], RedactFormat::Marker);
+    assert_eq!(out, "my number is [PHONE_1]");
+}
+
+#[test]
+fn ssn_continuous_detected() {
+    let r = PiiRedactor::new();
+    let out = r.redact_text("ssn is 123456789", &[PiiEntityType::Ssn], RedactFormat::Marker);
+    assert_eq!(out, "ssn is [SSN_1]");
+}
+
+#[test]
+fn short_digits_not_matched() {
+    let r = PiiRedactor::new();
+    let out = r.redact_text("code 123456 here", &[PiiEntityType::Phone, PiiEntityType::Ssn], RedactFormat::Marker);
+    assert_eq!(out, "code 123456 here");
+}
+
+#[test]
 fn luhn_valid() {
     assert!(luhn_check("4111111111111111"));
 }

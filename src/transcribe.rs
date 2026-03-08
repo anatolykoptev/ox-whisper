@@ -11,7 +11,20 @@ use crate::config::Config;
 use crate::models::Models;
 use crate::punctuate::add_punctuation;
 use crate::vad::apply_vad;
-use crate::words::{WordTimestamp, compute_chunk_offsets, extract_words_with_confidence};
+use crate::words::{WordTimestamp, compute_chunk_offsets, estimate_words_from_text, extract_words_with_confidence};
+
+/// Try model timestamps first, fall back to proportional estimation.
+fn extract_or_estimate(
+    tokens: &[String], timestamps: &[f32], log_probs: &[f32],
+    text: &str, chunk_samples: usize, offset: f32, words: &mut Vec<WordTimestamp>,
+) {
+    let before = words.len();
+    extract_words_with_confidence(tokens, timestamps, log_probs, offset, words);
+    if words.len() == before && !text.is_empty() {
+        let dur = chunk_samples as f32 / 16000.0;
+        words.extend(estimate_words_from_text(text, dur, offset));
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranscribeError {
@@ -127,7 +140,7 @@ fn transcribe_en(
                     let rt = retry.text.trim().to_string();
                     if !rt.is_empty() && compression_ratio(&rt) <= threshold {
                         let half_offset = offset + if j == 1 { mid as f32 / 16000.0 } else { 0.0 };
-                        extract_words_with_confidence(&retry.tokens, &retry.timestamps, &retry.log_probs, half_offset, &mut words);
+                        extract_or_estimate(&retry.tokens, &retry.timestamps, &retry.log_probs, &rt, half.len(), half_offset, &mut words);
                         texts.push(rt);
                     }
                 }
@@ -143,14 +156,14 @@ fn transcribe_en(
                 let rt = retry.text.trim().to_string();
                 if !rt.is_empty() && compression_ratio(&rt) <= threshold {
                     tracing::info!("EN chunk {}: retry ok (ratio {:.2} -> ok)", i, ratio);
-                    extract_words_with_confidence(&retry.tokens, &retry.timestamps, &retry.log_probs, offset, &mut words);
+                    extract_or_estimate(&retry.tokens, &retry.timestamps, &retry.log_probs, &rt, chunk.len(), offset, &mut words);
                     texts.push(rt);
                     continue;
                 }
             }
             tracing::warn!("EN chunk {}: ratio {:.2}, skip: {:?}", i, ratio, &text[..text.len().min(80)]);
         } else {
-            extract_words_with_confidence(&result.tokens, &result.timestamps, &result.log_probs, offset, &mut words);
+            extract_or_estimate(&result.tokens, &result.timestamps, &result.log_probs, &text, chunk.len(), offset, &mut words);
             texts.push(text);
         }
     }
@@ -174,9 +187,7 @@ fn transcribe_ru(
         if t.is_empty() || compression_ratio(&t) > threshold { continue; }
         let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
 
-        if !r.timestamps.is_empty() {
-            extract_words_with_confidence(&r.tokens, &r.timestamps, &r.log_probs, offset, &mut words);
-        }
+        extract_or_estimate(&r.tokens, &r.timestamps, &r.log_probs, &t, chunks[i].len(), offset, &mut words);
 
         texts.push(t);
     }

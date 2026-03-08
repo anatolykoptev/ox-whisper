@@ -48,6 +48,22 @@ fn apply_to_word_timestamps() {
     assert_eq!(words[1].word, "Docker");
 }
 
+#[test]
+fn spelling_preserves_trailing_punctuation() {
+    let rules = vec![SpellingRule { from: vec!["world".into()], to: "WORLD".into() }];
+    assert_eq!(apply_spelling("Hello world!", &rules), "Hello WORLD!");
+    assert_eq!(apply_spelling("Hello world...", &rules), "Hello WORLD...");
+}
+
+#[test]
+fn spelling_words_preserves_trailing_punctuation() {
+    let rules = vec![SpellingRule { from: vec!["world".into()], to: "WORLD".into() }];
+    let mut words = vec![word("Hello"), word("world!")];
+    apply_spelling_to_words(&mut words, &rules);
+    assert_eq!(words[0].word, "Hello");
+    assert_eq!(words[1].word, "WORLD!");
+}
+
 // --- keyword boost tests ---
 
 #[test]

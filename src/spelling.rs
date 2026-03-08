@@ -25,11 +25,13 @@ pub fn apply_spelling(text: &str, rules: &[SpellingRule]) -> String {
 }
 
 /// Apply spelling rules to individual word timestamps.
+/// Strips trailing punctuation before comparing and re-attaches it to the replacement.
 pub fn apply_spelling_to_words(words: &mut [WordTimestamp], rules: &[SpellingRule]) {
     for word in words.iter_mut() {
+        let (clean, punct) = split_trailing_punct(&word.word);
         for rule in rules {
-            if rule.from.iter().any(|f| words_match(&word.word, f)) {
-                word.word = rule.to.clone();
+            if rule.from.iter().any(|f| words_match(clean, f)) {
+                word.word = format!("{}{punct}", rule.to);
                 break;
             }
         }
@@ -42,9 +44,17 @@ fn words_match(a: &str, b: &str) -> bool {
 }
 
 /// Replace whole words case-insensitively by splitting on whitespace.
+/// Strips trailing punctuation before comparing and re-attaches it to the replacement.
 fn replace_word_ci(text: &str, from: &str, to: &str) -> String {
     text.split_whitespace()
-        .map(|w| if words_match(w, from) { to.to_string() } else { w.to_string() })
+        .map(|w| {
+            let (clean, punct) = split_trailing_punct(w);
+            if words_match(clean, from) {
+                format!("{to}{punct}")
+            } else {
+                w.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }

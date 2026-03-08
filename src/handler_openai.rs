@@ -55,6 +55,11 @@ pub async fn transcriptions(
                 r.text = crate::spelling::apply_spelling(&r.text, &upload.custom_spelling);
                 crate::spelling::apply_spelling_to_words(&mut r.words, &upload.custom_spelling);
             }
+            if !upload.pii_types.is_empty() {
+                let redactor = crate::pii::PiiRedactor::new();
+                r.text = redactor.redact_text(&r.text, &upload.pii_types, upload.pii_format);
+                redactor.redact_words(&mut r.words, &upload.pii_types, upload.pii_format);
+            }
             format_response(format, &r, &detected_lang, want_words, lang_confidence, upload.extra)
         }
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -92,6 +97,8 @@ struct OpenAIUpload {
     response_format: ResponseFormat,
     want_words: bool,
     custom_spelling: Vec<crate::spelling::SpellingRule>,
+    pii_types: Vec<crate::pii::PiiEntityType>,
+    pii_format: crate::pii::RedactFormat,
     extra: Option<serde_json::Value>,
 }
 
@@ -101,6 +108,8 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
     let mut response_format = ResponseFormat::default();
     let mut want_words = false;
     let mut custom_spelling = Vec::new();
+    let mut pii_types = Vec::new();
+    let mut pii_format = crate::pii::RedactFormat::default();
     let mut extra: Option<serde_json::Value> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -136,6 +145,17 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
                     custom_spelling = rules;
                 }
             }
+            "redact" => {
+                let val = field.text().await.unwrap_or_default();
+                pii_types = crate::pii::parse_pii_types(&val);
+            }
+            "redact_format" => {
+                let val = field.text().await.unwrap_or_default();
+                pii_format = match val.as_str() {
+                    "mask" => crate::pii::RedactFormat::Mask,
+                    _ => crate::pii::RedactFormat::Marker,
+                };
+            }
             "extra" => {
                 let val = field.text().await.unwrap_or_default();
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&val) {
@@ -153,6 +173,8 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
         response_format,
         want_words,
         custom_spelling,
+        pii_types,
+        pii_format,
         extra,
     })
 }

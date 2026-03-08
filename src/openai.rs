@@ -43,6 +43,8 @@ pub struct VerboseJsonResponse {
     pub segments: Vec<Segment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Word>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_confidence: Option<f64>,
 }
 
 /// Group word timestamps into segments of up to `WORDS_PER_SEGMENT` words.
@@ -132,8 +134,24 @@ mod tests {
             duration: 1.0,
             segments: vec![],
             words: vec![],
+            language_confidence: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("words"));
+        assert!(!json.contains("language_confidence"));
+    }
+
+    #[test]
+    fn verbose_response_includes_language_confidence() {
+        let resp = VerboseJsonResponse {
+            text: "hi".to_string(),
+            language: "en".to_string(),
+            duration: 1.0,
+            segments: vec![],
+            words: vec![],
+            language_confidence: Some(0.8),
+        };
+        let json: serde_json::Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["language_confidence"], 0.8);
     }
 }

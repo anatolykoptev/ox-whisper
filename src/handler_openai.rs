@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::audio;
-use crate::detect::detect_language;
+use crate::detect::{DetectResult, detect_language};
 use crate::formats;
 use crate::handlers::AppState;
 use crate::openai::{
@@ -26,10 +26,11 @@ pub async fn transcriptions(
     };
 
     let file_path = upload.file_path.clone();
-    let language = if upload.language.is_empty() {
-        detect_language_from_file(&state, &file_path)
+    let (language, lang_confidence) = if upload.language.is_empty() {
+        let detection = detect_language_from_file(&state, &file_path);
+        (detection.language, Some(detection.confidence))
     } else {
-        upload.language.clone()
+        (upload.language.clone(), None)
     };
 
     let format = upload.response_format;
@@ -49,7 +50,7 @@ pub async fn transcriptions(
     let _ = std::fs::remove_file(&file_path);
 
     match result {
-        Ok(r) => format_response(format, &r, &detected_lang, want_words),
+        Ok(r) => format_response(format, &r, &detected_lang, want_words, lang_confidence),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -136,7 +137,7 @@ fn normalize_language(lang: &str) -> String {
     lang.trim().to_lowercase()
 }
 
-fn detect_language_from_file(state: &Arc<AppState>, path: &Path) -> String {
+fn detect_language_from_file(state: &Arc<AppState>, path: &Path) -> DetectResult {
     let wav_result = audio::ensure_wav(path).and_then(|(wav_path, tmp)| {
         let result = audio::load_wav(&wav_path);
         if tmp {
@@ -148,7 +149,10 @@ fn detect_language_from_file(state: &Arc<AppState>, path: &Path) -> String {
         Ok((samples, _)) => detect_language(&state.models, &samples),
         Err(e) => {
             tracing::warn!("language detection failed, defaulting to en: {e}");
-            "en".to_string()
+            DetectResult {
+                language: "en".to_string(),
+                confidence: 0.0,
+            }
         }
     }
 }
@@ -158,6 +162,7 @@ fn format_response(
     result: &transcribe::TranscribeResult,
     language: &str,
     want_words: bool,
+    language_confidence: Option<f64>,
 ) -> Response {
     match format {
         ResponseFormat::Json => {
@@ -174,6 +179,7 @@ fn format_response(
                 duration: result.duration_ms / 1000.0,
                 segments,
                 words,
+                language_confidence,
             };
             axum::Json(body).into_response()
         }

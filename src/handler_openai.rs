@@ -58,6 +58,11 @@ pub async fn transcriptions(
             if upload.smart_format {
                 r.text = crate::smart_format::smart_format(&r.text, &detected_lang);
             }
+            if upload.paragraphs {
+                r.text = crate::paragraphs::split_paragraphs(
+                    &r.text, &r.words, crate::paragraphs::default_threshold(),
+                );
+            }
             if !upload.keywords.is_empty() {
                 r.text = crate::spelling::apply_keyword_boost(&r.text, &upload.keywords, upload.keywords_boost);
                 crate::spelling::apply_keyword_boost_to_words(&mut r.words, &upload.keywords, upload.keywords_boost);
@@ -105,6 +110,7 @@ struct OpenAIUpload {
     want_words: bool,
     custom_spelling: Vec<crate::spelling::SpellingRule>,
     smart_format: bool,
+    paragraphs: bool,
     pii_types: Vec<crate::pii::PiiEntityType>,
     pii_format: crate::pii::RedactFormat,
     keywords: Vec<String>,
@@ -119,6 +125,7 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
     let mut want_words = false;
     let mut custom_spelling = Vec::new();
     let mut smart_format_flag = false;
+    let mut paragraphs_flag = false;
     let mut pii_types = Vec::new();
     let mut pii_format = crate::pii::RedactFormat::default();
     let mut keywords: Vec<String> = Vec::new();
@@ -162,6 +169,10 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
                 let val = field.text().await.unwrap_or_default();
                 smart_format_flag = val == "true" || val == "1";
             }
+            "paragraphs" => {
+                let val = field.text().await.unwrap_or_default();
+                paragraphs_flag = val == "true" || val == "1";
+            }
             "redact" => {
                 let val = field.text().await.unwrap_or_default();
                 pii_types = crate::pii::parse_pii_types(&val);
@@ -201,6 +212,7 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
         want_words,
         custom_spelling,
         smart_format: smart_format_flag,
+        paragraphs: paragraphs_flag,
         pii_types,
         pii_format,
         keywords,

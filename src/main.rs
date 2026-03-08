@@ -15,6 +15,7 @@ mod handler_stream;
 mod handlers;
 mod models;
 mod openai;
+mod paragraphs;
 mod pii;
 mod pool;
 mod punctuate;

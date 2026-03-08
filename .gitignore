@@ -1,5 +1,6 @@
 /target
 .env
+docs/plans/
 vendor/sherpa-onnx/lib/*.so
 vendor/sherpa-onnx/lib/lib/
 vendor/sherpa-rs-sys/

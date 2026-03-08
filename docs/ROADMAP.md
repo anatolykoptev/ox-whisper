@@ -20,16 +20,19 @@ Drop-in замена `/v1/audio/transcriptions` — любой клиент Open
 - [x] Python OpenAI SDK совместимость проверена
 - [ ] `POST /v1/audio/translations` — транскрибция + перевод в EN (через LLM proxy)
 
-## v0.3.0 — RU Quality + DX
+## v0.3.0 — DX + Bugfixes (done)
 
-WER 4-5% на русском (сейчас ~8-10%). Мелкие DX-улучшения от конкурентов.
+DX-улучшения от конкурентов + исправление багов пунктуации и пустых результатов.
 
-- [ ] GigaAM v3 RNNT с built-in punctuation
-- [ ] Авто-определение модели: GigaAM v3 > GigaAM v2 > Zipformer
+- [x] `extra` passthrough — произвольные KV-пары в запросе проходят в ответ (как Deepgram)
+- [x] `custom_spelling` — замена слов в выводе (`{"from": ["докер"], "to": "Docker"}`)
+- [x] `language_confidence` — возвращать confidence в verbose_json при авто-определении
+- [x] Авто-определение модели: GigaAM v3 > GigaAM v2 > Zipformer (реализовано в v0.1)
+- [x] Fix: EN двойная пунктуация — Moonshine v2 уже ставит знаки, внешний пунктуатор пропускается
+- [x] Fix: пустой результат на длинных чанках — retry с разбиением пополам
+- [x] Fix: удалены unused `extract_words()`, `Pool::size()`
+- [ ] GigaAM v3 RNNT — код готов, нужно подключить модель в Docker
 - [ ] Бенчмарки WER на Golos/CommonVoice
-- [ ] `extra` passthrough — произвольные KV-пары в запросе проходят в ответ (как Deepgram `extra=job_id:123`)
-- [ ] `custom_spelling` — замена слов в выводе (`{"from": ["докер"], "to": "Docker"}`)
-- [ ] Language detection confidence — возвращать `language_confidence` в verbose_json
 
 ## v0.4.0 — Smart Features
 

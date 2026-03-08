@@ -28,7 +28,17 @@ pub struct Config {
     pub vad_min_silence_s: f32,
     /// Padding added around speech segments, seconds (VAD_SPEECH_PAD_S, default: 0.05)
     pub vad_speech_pad_s: f32,
-    /// ONNX execution provider (ONNX_PROVIDER, default: "xnnpack")
+    /// Minimum speech duration for VAD segments, seconds (VAD_MIN_SPEECH_S, default: 0.25)
+    pub vad_min_speech_s: f32,
+    /// Maximum chunk duration for VAD grouping, seconds (VAD_MAX_CHUNK_S, default: 20)
+    pub vad_max_chunk_s: usize,
+    /// Maximum chunk duration for non-VAD splitting, seconds (MAX_CHUNK_S, default: 20)
+    pub max_chunk_s: usize,
+    /// Compression ratio threshold for hallucination guard (HALLUCINATION_THRESHOLD, default: 2.4)
+    pub hallucination_threshold: f64,
+    /// Maximum upload body size in MB (MAX_BODY_SIZE_MB, default: 50)
+    pub max_body_size_mb: usize,
+    /// ONNX execution provider (ONNX_PROVIDER, default: "cpu")
     pub provider: String,
 }
 
@@ -78,6 +88,26 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.05),
+            vad_min_speech_s: env::var("VAD_MIN_SPEECH_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.25),
+            vad_max_chunk_s: env::var("VAD_MAX_CHUNK_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            max_chunk_s: env::var("MAX_CHUNK_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            hallucination_threshold: env::var("HALLUCINATION_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2.4),
+            max_body_size_mb: env::var("MAX_BODY_SIZE_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50),
             provider: env::var("ONNX_PROVIDER")
                 .unwrap_or_else(|_| "cpu".to_string()),
         }

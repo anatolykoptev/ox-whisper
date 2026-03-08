@@ -197,7 +197,7 @@ fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {
     }
     let cfg = SileroVadConfig {
         model: config.vad_model.clone(), threshold: config.vad_threshold,
-        min_silence_duration: config.vad_min_silence_s, min_speech_duration: 0.25,
+        min_silence_duration: config.vad_min_silence_s, min_speech_duration: config.vad_min_speech_s,
         window_size: 512, ..Default::default()
     };
     let vad_max = if config.max_audio_duration_s > 0.0 { config.max_audio_duration_s } else { 3600.0 };

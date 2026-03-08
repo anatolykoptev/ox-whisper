@@ -60,26 +60,28 @@ fn do_transcribe(
     let use_vad = vad_override
         .unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
 
+    let max_chunk_samples = config.max_chunk_s * 16000;
     let (audio_chunks, speech_ms) = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
             let mut vad = vad_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
-            let vad_result = apply_vad(&mut vad, &samples, 16000, config.vad_speech_pad_s);
+            let vad_result = apply_vad(&mut vad, &samples, 16000, config.vad_speech_pad_s, config.vad_max_chunk_s);
             let total_ms = duration * 1000.0;
             let pct = if total_ms > 0.0 { 100.0 * vad_result.speech_ms / total_ms } else { 0.0 };
             tracing::info!("VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} chunk(s)",
                 vad_result.speech_ms, total_ms, pct, vad_result.chunks.len());
             (vad_result.chunks, vad_result.speech_ms)
         } else {
-            (split_audio_chunks(samples, 16000), 0.0)
+            (split_audio_chunks(samples, max_chunk_samples), 0.0)
         }
     } else {
-        (split_audio_chunks(samples, 16000), 0.0)
+        (split_audio_chunks(samples, max_chunk_samples), 0.0)
     };
 
     let chunk_offsets = compute_chunk_offsets(&audio_chunks, 16000);
+    let threshold = config.hallucination_threshold;
     let (texts, words) = match language {
-        "ru" => transcribe_ru(models, &audio_chunks, &chunk_offsets)?,
-        _ => transcribe_en(models, &audio_chunks, language, &chunk_offsets)?,
+        "ru" => transcribe_ru(models, &audio_chunks, &chunk_offsets, threshold)?,
+        _ => transcribe_en(models, &audio_chunks, language, &chunk_offsets, threshold)?,
     };
 
     let joined = texts.join(" ");
@@ -102,6 +104,7 @@ fn do_transcribe(
 
 fn transcribe_en(
     models: &Models, chunks: &[Vec<f32>], language: &str, chunk_offsets: &[f64],
+    threshold: f64,
 ) -> Result<(Vec<String>, Vec<WordTimestamp>), TranscribeError> {
     let pool = models.en.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
@@ -115,13 +118,13 @@ fn transcribe_en(
         let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
         if text.is_empty() {
             tracing::debug!("EN chunk {}: empty ({} samples)", i, chunk.len());
-        } else if ratio > 2.4 {
+        } else if ratio > threshold {
             // Retry with trimmed audio (drop 5% from edges to shift alignment)
             let trim = chunk.len() / 20;
             if trim > 0 && chunk.len() > trim * 2 + 1600 {
                 let retry = rec.transcribe(16000, &chunk[trim..chunk.len() - trim]);
                 let rt = retry.text.trim().to_string();
-                if !rt.is_empty() && compression_ratio(&rt) <= 2.4 {
+                if !rt.is_empty() && compression_ratio(&rt) <= threshold {
                     tracing::info!("EN chunk {}: retry ok (ratio {:.2} -> ok)", i, ratio);
                     extract_words_with_confidence(&retry.tokens, &retry.timestamps, &retry.log_probs, offset, &mut words);
                     texts.push(rt);
@@ -139,6 +142,7 @@ fn transcribe_en(
 
 fn transcribe_ru(
     models: &Models, chunks: &[Vec<f32>], chunk_offsets: &[f64],
+    threshold: f64,
 ) -> Result<(Vec<String>, Vec<WordTimestamp>), TranscribeError> {
     let pool = models.ru.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
@@ -150,7 +154,7 @@ fn transcribe_ru(
     let mut words = Vec::new();
     for (i, r) in results.into_iter().enumerate() {
         let t = r.text.trim().to_string();
-        if t.is_empty() || compression_ratio(&t) > 2.4 { continue; }
+        if t.is_empty() || compression_ratio(&t) > threshold { continue; }
         let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
 
         if !r.timestamps.is_empty() {
@@ -177,14 +181,11 @@ pub(crate) fn maybe_punctuate(
     text.to_string()
 }
 
-const MAX_CHUNK_SECONDS: usize = 20;
-const MAX_CHUNK_SAMPLES: usize = MAX_CHUNK_SECONDS * 16000;
-
-pub(crate) fn split_audio_chunks(samples: Vec<f32>, _sample_rate: u32) -> Vec<Vec<f32>> {
-    if samples.len() <= MAX_CHUNK_SAMPLES {
+pub(crate) fn split_audio_chunks(samples: Vec<f32>, max_chunk_samples: usize) -> Vec<Vec<f32>> {
+    if samples.len() <= max_chunk_samples {
         return vec![samples];
     }
-    samples.chunks(MAX_CHUNK_SAMPLES).map(|c| c.to_vec()).collect()
+    samples.chunks(max_chunk_samples).map(|c| c.to_vec()).collect()
 }
 
 pub(crate) fn compression_ratio(text: &str) -> f64 {

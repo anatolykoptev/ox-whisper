@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::from_env();
     let port = config.port;
+    let max_body_size = config.max_body_size_mb * 1024 * 1024;
 
     tracing::info!("Loading models...");
     let models = Models::load(&config);
@@ -45,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/transcribe", post(handlers::transcribe_json))
         .route("/transcribe/upload", post(handlers::transcribe_upload))
         .route("/transcribe/stream", post(handler_stream::transcribe_stream))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(max_body_size))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);

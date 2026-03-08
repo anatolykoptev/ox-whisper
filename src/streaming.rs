@@ -53,30 +53,32 @@ fn do_transcribe_streaming(
 ) -> Result<TranscribeResult, TranscribeError> {
     let (samples, duration) = load_wav(wav_path)?;
 
-    if duration > config.max_audio_duration_s {
+    if config.max_audio_duration_s > 0.0 && duration > config.max_audio_duration_s {
         return Err(TranscribeError::TooLong(duration, config.max_audio_duration_s));
     }
 
     let use_vad = vad_override
         .unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
 
+    let max_chunk_samples = config.max_chunk_s * 16000;
     let (audio_chunks, speech_ms) = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
             let mut vad = vad_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
-            let vad_result = apply_vad(&mut vad, &samples, 16000, config.vad_speech_pad_s);
+            let vad_result = apply_vad(&mut vad, &samples, 16000, config.vad_speech_pad_s, config.vad_max_chunk_s);
             (vad_result.chunks, vad_result.speech_ms)
         } else {
-            (split_audio_chunks(samples, 16000), 0.0)
+            (split_audio_chunks(samples, max_chunk_samples), 0.0)
         }
     } else {
-        (split_audio_chunks(samples, 16000), 0.0)
+        (split_audio_chunks(samples, max_chunk_samples), 0.0)
     };
 
     let total = audio_chunks.len();
 
+    let threshold = config.hallucination_threshold;
     let texts = match language {
-        "ru" => transcribe_ru_streaming(models, &audio_chunks, total, tx)?,
-        _ => transcribe_en_streaming(models, &audio_chunks, language, total, tx)?,
+        "ru" => transcribe_ru_streaming(models, &audio_chunks, total, tx, threshold)?,
+        _ => transcribe_en_streaming(models, &audio_chunks, language, total, tx, threshold)?,
     };
 
     let joined = texts.join(" ");
@@ -91,6 +93,7 @@ fn transcribe_ru_streaming(
     chunks: &[Vec<f32>],
     total: usize,
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
+    threshold: f64,
 ) -> Result<Vec<String>, TranscribeError> {
     let pool = models.ru.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
@@ -99,7 +102,7 @@ fn transcribe_ru_streaming(
     for (i, chunk) in chunks.iter().enumerate() {
         let result = rec.transcribe(16000, chunk);
         let text = result.text.trim().to_string();
-        if !text.is_empty() && compression_ratio(&text) <= 2.4 {
+        if !text.is_empty() && compression_ratio(&text) <= threshold {
             let _ = tx.blocking_send(StreamEvent {
                 chunk_index: i, total_chunks: total, text: text.clone(),
             });
@@ -115,6 +118,7 @@ fn transcribe_en_streaming(
     language: &str,
     total: usize,
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
+    threshold: f64,
 ) -> Result<Vec<String>, TranscribeError> {
     let pool = models.en.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
@@ -123,7 +127,7 @@ fn transcribe_en_streaming(
     for (i, chunk) in chunks.iter().enumerate() {
         let result = rec.transcribe(16000, chunk);
         let text = result.text.trim().to_string();
-        if !text.is_empty() && compression_ratio(&text) <= 2.4 {
+        if !text.is_empty() && compression_ratio(&text) <= threshold {
             let _ = tx.blocking_send(StreamEvent {
                 chunk_index: i, total_chunks: total, text: text.clone(),
             });

@@ -6,14 +6,13 @@ pub struct VadResult {
 }
 
 const WINDOW_SIZE: usize = 512;
-const MAX_CHUNK_SECONDS: usize = 5;
 
 /// Applies Voice Activity Detection to split audio into speech chunks.
 ///
 /// Feeds samples through Silero VAD in 512-sample windows, collects
-/// speech segments, and groups them into chunks of at most 5 seconds.
+/// speech segments, and groups them into chunks of at most `max_chunk_s` seconds.
 /// Single segments longer than the limit are force-split.
-pub fn apply_vad(vad: &mut SileroVad, samples: &[f32], sample_rate: u32, pad_s: f32) -> VadResult {
+pub fn apply_vad(vad: &mut SileroVad, samples: &[f32], sample_rate: u32, pad_s: f32, max_chunk_s: usize) -> VadResult {
     let pad_samples = (pad_s * sample_rate as f32) as usize;
     // Feed 512-sample windows
     let mut offset = 0;
@@ -47,7 +46,7 @@ pub fn apply_vad(vad: &mut SileroVad, samples: &[f32], sample_rate: u32, pad_s: 
         .sum();
 
     // Group segments into chunks, force-splitting segments exceeding the limit
-    let max_chunk_samples = MAX_CHUNK_SECONDS * sample_rate as usize;
+    let max_chunk_samples = max_chunk_s * sample_rate as usize;
     let mut chunks: Vec<Vec<f32>> = Vec::new();
     let mut current_chunk: Vec<f32> = Vec::new();
 

@@ -8,9 +8,13 @@ use tokio::net::TcpListener;
 mod audio;
 mod chunking;
 mod config;
+mod detect;
+mod formats;
+mod handler_openai;
 mod handler_stream;
 mod handlers;
 mod models;
+mod openai;
 mod pool;
 mod punctuate;
 mod recognizer;
@@ -46,6 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/transcribe", post(handlers::transcribe_json))
         .route("/transcribe/upload", post(handlers::transcribe_upload))
         .route("/transcribe/stream", post(handler_stream::transcribe_stream))
+        .route("/v1/audio/transcriptions", post(handler_openai::transcriptions))
+        .route("/v1/models", get(handler_openai::list_models))
         .layer(DefaultBodyLimit::max(max_body_size))
         .with_state(state);
 

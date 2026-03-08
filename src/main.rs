@@ -9,6 +9,7 @@ mod audio;
 mod chunking;
 mod config;
 mod detect;
+mod diarize;
 mod formats;
 mod handler_openai;
 mod handler_stream;
@@ -24,6 +25,7 @@ mod smart_format;
 mod spelling;
 mod streaming;
 mod transcribe;
+mod upload;
 mod vad;
 mod words;
 

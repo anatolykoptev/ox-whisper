@@ -15,12 +15,13 @@ use crate::openai::{
     JsonResponse, ResponseFormat, VerboseJsonResponse, words_to_openai, words_to_segments,
 };
 use crate::transcribe;
+use crate::upload;
 
 pub async fn transcriptions(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Response {
-    let upload = match parse_openai_upload(&mut multipart).await {
+    let upload = match upload::parse_openai_upload(&mut multipart).await {
         Ok(u) => u,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, &msg),
     };
@@ -38,43 +39,83 @@ pub async fn transcriptions(
     let path = file_path.clone();
     let detected_lang = language.clone();
 
+    let state_clone = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         transcribe::transcribe(
-            &state.models, &state.config, &path, &language,
+            &state_clone.models, &state_clone.config, &path, &language,
             None, None, 0,
         )
     })
     .await
     .unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
 
-    let _ = std::fs::remove_file(&file_path);
-
-    match result {
+    let response = match result {
         Ok(mut r) => {
-            if !upload.custom_spelling.is_empty() {
-                r.text = crate::spelling::apply_spelling(&r.text, &upload.custom_spelling);
-                crate::spelling::apply_spelling_to_words(&mut r.words, &upload.custom_spelling);
+            if upload.diarize && state.models.diarize.is_some() {
+                run_diarization(&state, &file_path, &mut r, upload.diarize_speakers).await;
             }
-            if upload.smart_format {
-                r.text = crate::smart_format::smart_format(&r.text, &detected_lang);
-            }
-            if upload.paragraphs {
-                r.text = crate::paragraphs::split_paragraphs(
-                    &r.text, &r.words, crate::paragraphs::default_threshold(),
-                );
-            }
-            if !upload.keywords.is_empty() {
-                r.text = crate::spelling::apply_keyword_boost(&r.text, &upload.keywords, upload.keywords_boost);
-                crate::spelling::apply_keyword_boost_to_words(&mut r.words, &upload.keywords, upload.keywords_boost);
-            }
-            if !upload.pii_types.is_empty() {
-                let redactor = crate::pii::PiiRedactor::new();
-                r.text = redactor.redact_text(&r.text, &upload.pii_types, upload.pii_format);
-                redactor.redact_words(&mut r.words, &upload.pii_types, upload.pii_format);
-            }
-            format_response(format, &r, &detected_lang, want_words, lang_confidence, upload.extra)
+            apply_post_processing(&upload, &mut r, &detected_lang);
+            let utterances = if upload.diarize {
+                crate::diarize::words_to_utterances(&r.words)
+            } else {
+                vec![]
+            };
+            format_response(format, &r, &detected_lang, want_words, lang_confidence, upload.extra, utterances)
         }
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    let _ = std::fs::remove_file(&file_path);
+    response
+}
+
+async fn run_diarization(
+    state: &Arc<AppState>,
+    file_path: &Path,
+    result: &mut transcribe::TranscribeResult,
+    num_speakers: Option<i32>,
+) {
+    if let Ok((wav_path, tmp)) = audio::ensure_wav(file_path) {
+        if let Ok((samples, _)) = audio::load_wav(&wav_path) {
+            if tmp { let _ = std::fs::remove_file(&wav_path); }
+            let diarize_state = state.clone();
+            let mut words = std::mem::take(&mut result.words);
+            let diarized = tokio::task::spawn_blocking(move || {
+                if let Some(ref engine) = diarize_state.models.diarize {
+                    engine.assign_speakers(&samples, &mut words, num_speakers);
+                }
+                words
+            }).await.unwrap_or_default();
+            result.words = diarized;
+        }
+    }
+}
+
+fn apply_post_processing(
+    upload: &upload::OpenAIUpload,
+    r: &mut transcribe::TranscribeResult,
+    detected_lang: &str,
+) {
+    if !upload.custom_spelling.is_empty() {
+        r.text = crate::spelling::apply_spelling(&r.text, &upload.custom_spelling);
+        crate::spelling::apply_spelling_to_words(&mut r.words, &upload.custom_spelling);
+    }
+    if upload.smart_format {
+        r.text = crate::smart_format::smart_format(&r.text, detected_lang);
+    }
+    if upload.paragraphs {
+        r.text = crate::paragraphs::split_paragraphs(
+            &r.text, &r.words, crate::paragraphs::default_threshold(),
+        );
+    }
+    if !upload.keywords.is_empty() {
+        r.text = crate::spelling::apply_keyword_boost(&r.text, &upload.keywords, upload.keywords_boost);
+        crate::spelling::apply_keyword_boost_to_words(&mut r.words, &upload.keywords, upload.keywords_boost);
+    }
+    if !upload.pii_types.is_empty() {
+        let redactor = crate::pii::PiiRedactor::new();
+        r.text = redactor.redact_text(&r.text, &upload.pii_types, upload.pii_format);
+        redactor.redact_words(&mut r.words, &upload.pii_types, upload.pii_format);
     }
 }
 
@@ -103,144 +144,17 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde
 
 // --- internals ---
 
-struct OpenAIUpload {
-    file_path: std::path::PathBuf,
-    language: String,
-    response_format: ResponseFormat,
-    want_words: bool,
-    custom_spelling: Vec<crate::spelling::SpellingRule>,
-    smart_format: bool,
-    paragraphs: bool,
-    pii_types: Vec<crate::pii::PiiEntityType>,
-    pii_format: crate::pii::RedactFormat,
-    keywords: Vec<String>,
-    keywords_boost: f64,
-    extra: Option<serde_json::Value>,
-}
-
-async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, String> {
-    let mut file_path: Option<std::path::PathBuf> = None;
-    let mut language = String::new();
-    let mut response_format = ResponseFormat::default();
-    let mut want_words = false;
-    let mut custom_spelling = Vec::new();
-    let mut smart_format_flag = false;
-    let mut paragraphs_flag = false;
-    let mut pii_types = Vec::new();
-    let mut pii_format = crate::pii::RedactFormat::default();
-    let mut keywords: Vec<String> = Vec::new();
-    let mut keywords_boost: f64 = 0.8;
-    let mut extra: Option<serde_json::Value> = None;
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or("").to_string();
-        match name.as_str() {
-            "file" => {
-                let ext = field
-                    .file_name()
-                    .and_then(|n| {
-                        Path::new(n).extension().map(|e| e.to_string_lossy().to_string())
-                    })
-                    .unwrap_or_else(|| "wav".to_string());
-                let tmp = format!("/tmp/{}.{}", uuid::Uuid::new_v4(), ext);
-                let data = field.bytes().await.map_err(|e| e.to_string())?;
-                std::fs::write(&tmp, &data).map_err(|e: std::io::Error| e.to_string())?;
-                file_path = Some(std::path::PathBuf::from(tmp));
-            }
-            "language" => language = field.text().await.unwrap_or_default(),
-            "response_format" => {
-                let val = field.text().await.unwrap_or_default();
-                let quoted = format!("\"{}\"", val);
-                response_format = serde_json::from_str(&quoted).unwrap_or_default();
-            }
-            "timestamp_granularities[]" => {
-                let val = field.text().await.unwrap_or_default();
-                if val == "word" {
-                    want_words = true;
-                }
-            }
-            "custom_spelling" => {
-                let val = field.text().await.unwrap_or_default();
-                if let Ok(rules) = serde_json::from_str::<Vec<crate::spelling::SpellingRule>>(&val) {
-                    custom_spelling = rules;
-                }
-            }
-            "smart_format" => {
-                let val = field.text().await.unwrap_or_default();
-                smart_format_flag = val == "true" || val == "1";
-            }
-            "paragraphs" => {
-                let val = field.text().await.unwrap_or_default();
-                paragraphs_flag = val == "true" || val == "1";
-            }
-            "redact" => {
-                let val = field.text().await.unwrap_or_default();
-                pii_types = crate::pii::parse_pii_types(&val);
-            }
-            "redact_format" => {
-                let val = field.text().await.unwrap_or_default();
-                pii_format = match val.as_str() {
-                    "mask" => crate::pii::RedactFormat::Mask,
-                    _ => crate::pii::RedactFormat::Marker,
-                };
-            }
-            "keywords" => {
-                let val = field.text().await.unwrap_or_default();
-                if let Ok(kw) = serde_json::from_str::<Vec<String>>(&val) {
-                    keywords = kw;
-                }
-            }
-            "keywords_boost" => {
-                let val = field.text().await.unwrap_or_default();
-                keywords_boost = val.parse().unwrap_or(0.8);
-            }
-            "extra" => {
-                let val = field.text().await.unwrap_or_default();
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&val) {
-                    extra = Some(parsed);
-                }
-            }
-            // model, temperature, prompt — accepted but ignored
-            _ => { let _ = field.bytes().await; }
-        }
-    }
-
-    Ok(OpenAIUpload {
-        file_path: file_path.ok_or("missing 'file' field")?,
-        language: normalize_language(&language),
-        response_format,
-        want_words,
-        custom_spelling,
-        smart_format: smart_format_flag,
-        paragraphs: paragraphs_flag,
-        pii_types,
-        pii_format,
-        keywords,
-        keywords_boost,
-        extra,
-    })
-}
-
-fn normalize_language(lang: &str) -> String {
-    lang.trim().to_lowercase()
-}
-
 fn detect_language_from_file(state: &Arc<AppState>, path: &Path) -> DetectResult {
     let wav_result = audio::ensure_wav(path).and_then(|(wav_path, tmp)| {
         let result = audio::load_wav(&wav_path);
-        if tmp {
-            let _ = std::fs::remove_file(&wav_path);
-        }
+        if tmp { let _ = std::fs::remove_file(&wav_path); }
         result
     });
     match wav_result {
         Ok((samples, _)) => detect_language(&state.models, &samples),
         Err(e) => {
             tracing::warn!("language detection failed, defaulting to en: {e}");
-            DetectResult {
-                language: "en".to_string(),
-                confidence: 0.0,
-            }
+            DetectResult { language: "en".to_string(), confidence: 0.0 }
         }
     }
 }
@@ -252,6 +166,7 @@ fn format_response(
     want_words: bool,
     language_confidence: Option<f64>,
     extra: Option<serde_json::Value>,
+    utterances: Vec<crate::diarize::Utterance>,
 ) -> Response {
     match format {
         ResponseFormat::Json => {
@@ -266,10 +181,7 @@ fn format_response(
                 text: result.text.clone(),
                 language: lang.to_string(),
                 duration: result.duration_ms / 1000.0,
-                segments,
-                words,
-                language_confidence,
-                extra,
+                segments, words, language_confidence, utterances, extra,
             };
             axum::Json(body).into_response()
         }
@@ -289,10 +201,7 @@ fn format_response(
 
 fn error_response(status: StatusCode, message: &str) -> Response {
     let body = serde_json::json!({
-        "error": {
-            "message": message,
-            "type": "invalid_request_error",
-        }
+        "error": { "message": message, "type": "invalid_request_error" }
     });
     (status, axum::Json(body)).into_response()
 }

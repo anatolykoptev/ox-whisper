@@ -7,6 +7,8 @@ pub struct WordTimestamp {
     pub end: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<i32>,
 }
 
 /// Compute the time offset (in seconds) of each audio chunk.
@@ -63,6 +65,7 @@ pub fn extract_words_with_confidence(
                     start: word_start + offset,
                     end: word_end + offset,
                     confidence: avg_confidence(&word_log_probs),
+                    speaker: None,
                 });
             }
             current_word.clear();
@@ -87,6 +90,7 @@ pub fn extract_words_with_confidence(
                 start: word_start + offset,
                 end: word_end + offset,
                 confidence: avg_confidence(&word_log_probs),
+                speaker: None,
             });
         }
     }

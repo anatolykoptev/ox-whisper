@@ -16,6 +16,7 @@ pub struct Models {
     pub ru: Option<Pool<RuRecognizer>>,
     pub vad: Option<Mutex<SileroVad>>,
     pub punct: Option<Mutex<OnlinePunctuation>>,
+    pub diarize: Option<crate::diarize::DiarizeEngine>,
 }
 
 impl Models {
@@ -24,11 +25,15 @@ impl Models {
         let ru = load_ru(config);
         let vad = load_vad(config);
         let punct = load_punctuation(config);
+        let diarize = crate::diarize::DiarizeEngine::load(
+            &config.diarize_segmentation_model,
+            &config.diarize_embedding_model,
+        );
 
         warmup(&en, "EN");
         warmup(&ru, "RU");
 
-        Self { en, ru, vad, punct }
+        Self { en, ru, vad, punct, diarize }
     }
 }
 

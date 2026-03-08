@@ -40,6 +40,10 @@ pub struct Config {
     pub max_body_size_mb: usize,
     /// ONNX execution provider (ONNX_PROVIDER, default: "cpu")
     pub provider: String,
+    /// Diarization segmentation model path (DIARIZE_SEGMENTATION_MODEL)
+    pub diarize_segmentation_model: String,
+    /// Diarization embedding model path (DIARIZE_EMBEDDING_MODEL)
+    pub diarize_embedding_model: String,
 }
 
 impl Config {
@@ -110,6 +114,10 @@ impl Config {
                 .unwrap_or(50),
             provider: env::var("ONNX_PROVIDER")
                 .unwrap_or_else(|_| "cpu".to_string()),
+            diarize_segmentation_model: env::var("DIARIZE_SEGMENTATION_MODEL")
+                .unwrap_or_else(|_| "/diarize/segmentation.onnx".to_string()),
+            diarize_embedding_model: env::var("DIARIZE_EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "/diarize/embedding.onnx".to_string()),
         }
     }
 }

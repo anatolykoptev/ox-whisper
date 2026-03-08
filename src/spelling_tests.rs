@@ -1,7 +1,7 @@
 use super::*;
 
 fn word(w: &str) -> WordTimestamp {
-    WordTimestamp { word: w.to_string(), start: 0.0, end: 0.0, confidence: None }
+    WordTimestamp { word: w.to_string(), start: 0.0, end: 0.0, confidence: None, speaker: None }
 }
 
 // --- spelling rules tests ---

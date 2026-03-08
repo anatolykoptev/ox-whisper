@@ -94,7 +94,7 @@ mod tests {
     use super::*;
 
     fn make_word(word: &str, start: f32, end: f32) -> WordTimestamp {
-        WordTimestamp { word: word.to_string(), start, end, confidence: None }
+        WordTimestamp { word: word.to_string(), start, end, confidence: None, speaker: None }
     }
 
     #[test]

@@ -48,6 +48,8 @@ ENV ZIPFORMER_RU_DIR=/ru-models
 ENV SILERO_VAD_MODEL=/vad/silero_vad.onnx
 ENV PUNCT_MODEL=/punct/model.int8.onnx
 ENV PUNCT_VOCAB=/punct/bpe.vocab
+ENV DIARIZE_SEGMENTATION_MODEL=/diarize/segmentation.onnx
+ENV DIARIZE_EMBEDDING_MODEL=/diarize/embedding.onnx
 
 EXPOSE 8092
 

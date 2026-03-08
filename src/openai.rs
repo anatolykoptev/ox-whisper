@@ -4,7 +4,7 @@ use crate::words::WordTimestamp;
 
 const WORDS_PER_SEGMENT: usize = 8;
 
-#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseFormat {
     #[default]
@@ -47,6 +47,8 @@ pub struct VerboseJsonResponse {
     pub words: Vec<Word>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language_confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub utterances: Vec<crate::diarize::Utterance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
 }
@@ -108,6 +110,7 @@ mod tests {
                 start: i as f32,
                 end: i as f32 + 0.5,
                 confidence: None,
+                speaker: None,
             })
             .collect();
 
@@ -140,6 +143,7 @@ mod tests {
             segments: vec![],
             words: vec![],
             language_confidence: None,
+            utterances: vec![],
             extra: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -156,6 +160,7 @@ mod tests {
             segments: vec![],
             words: vec![],
             language_confidence: Some(0.8),
+            utterances: vec![],
             extra: None,
         };
         let json: serde_json::Value = serde_json::to_value(&resp).unwrap();
@@ -181,6 +186,7 @@ mod tests {
             language_confidence: None,
             segments: vec![],
             words: vec![],
+            utterances: vec![],
             extra: None,
         };
         let json = serde_json::to_value(&resp).unwrap();

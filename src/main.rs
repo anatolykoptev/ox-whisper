@@ -28,6 +28,9 @@ mod transcribe;
 mod upload;
 mod vad;
 mod words;
+mod ws_handler;
+mod ws_session;
+mod ws_types;
 
 use crate::config::Config;
 use crate::handlers::AppState;
@@ -58,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/transcribe/stream", post(handler_stream::transcribe_stream))
         .route("/v1/audio/transcriptions", post(handler_openai::transcriptions))
         .route("/v1/models", get(handler_openai::list_models))
+        .route("/v1/listen", get(ws_handler::ws_listen))
         .layer(DefaultBodyLimit::max(max_body_size))
         .with_state(state);
 

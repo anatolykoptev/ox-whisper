@@ -1,6 +1,7 @@
 /// Custom spelling replacement — apply domain-specific word corrections.
 
 use serde::Deserialize;
+use strsim;
 use crate::words::WordTimestamp;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,50 +49,74 @@ fn replace_word_ci(text: &str, from: &str, to: &str) -> String {
         .join(" ")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Normalized Levenshtein similarity (0.0-1.0).
+fn levenshtein_similarity(a: &str, b: &str) -> f64 {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    if a == b { return 1.0; }
+    let max_len = a.chars().count().max(b.chars().count());
+    if max_len == 0 { return 1.0; }
+    1.0 - (strsim::levenshtein(&a, &b) as f64 / max_len as f64)
+}
 
-    fn word(w: &str) -> WordTimestamp {
-        WordTimestamp { word: w.to_string(), start: 0.0, end: 0.0, confidence: None }
-    }
+/// Boost keywords by fuzzy-matching words in text.
+/// Words with similarity >= threshold to any keyword get replaced.
+/// Short words (<4 chars) require exact match to avoid false positives.
+pub fn apply_keyword_boost(text: &str, keywords: &[String], threshold: f64) -> String {
+    text.split_whitespace()
+        .map(|word| {
+            let (clean, punct) = split_trailing_punct(word);
+            if clean.chars().count() < 4 {
+                for kw in keywords {
+                    if clean.to_lowercase() == kw.to_lowercase() {
+                        return format!("{kw}{punct}");
+                    }
+                }
+            } else {
+                for kw in keywords {
+                    if levenshtein_similarity(clean, kw) >= threshold {
+                        return format!("{kw}{punct}");
+                    }
+                }
+            }
+            word.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
-    #[test]
-    fn no_rules_returns_unchanged() {
-        assert_eq!(apply_spelling("hello world", &[]), "hello world");
-    }
-
-    #[test]
-    fn single_replacement() {
-        let rules = vec![SpellingRule { from: vec!["докер".into()], to: "Docker".into() }];
-        assert_eq!(apply_spelling("запустим докер", &rules), "запустим Docker");
-    }
-
-    #[test]
-    fn multiple_from_variants() {
-        let rules = vec![SpellingRule { from: vec!["докер".into(), "докера".into()], to: "Docker".into() }];
-        assert_eq!(apply_spelling("версия докера", &rules), "версия Docker");
-    }
-
-    #[test]
-    fn case_insensitive() {
-        let rules = vec![SpellingRule { from: vec!["kubernetes".into()], to: "Kubernetes".into() }];
-        assert_eq!(apply_spelling("deploy to kubernetes", &rules), "deploy to Kubernetes");
-    }
-
-    #[test]
-    fn word_boundary_respected() {
-        let rules = vec![SpellingRule { from: vec!["к".into()], to: "K".into() }];
-        assert_eq!(apply_spelling("к нам", &rules), "K нам");
-        assert_eq!(apply_spelling("как дела", &rules), "как дела");
-    }
-
-    #[test]
-    fn apply_to_word_timestamps() {
-        let rules = vec![SpellingRule { from: vec!["докер".into()], to: "Docker".into() }];
-        let mut words = vec![word("запустим"), word("докер")];
-        apply_spelling_to_words(&mut words, &rules);
-        assert_eq!(words[0].word, "запустим");
-        assert_eq!(words[1].word, "Docker");
+/// Apply keyword boost to word timestamps.
+pub fn apply_keyword_boost_to_words(
+    words: &mut [WordTimestamp],
+    keywords: &[String],
+    threshold: f64,
+) {
+    for word in words.iter_mut() {
+        let clean = word.word.trim_end_matches(|c: char| c.is_ascii_punctuation());
+        if clean.chars().count() < 4 {
+            for kw in keywords {
+                if clean.to_lowercase() == kw.to_lowercase() {
+                    word.word = kw.clone();
+                    break;
+                }
+            }
+        } else {
+            for kw in keywords {
+                if levenshtein_similarity(clean, kw) >= threshold {
+                    word.word = kw.clone();
+                    break;
+                }
+            }
+        }
     }
 }
+
+fn split_trailing_punct(word: &str) -> (&str, &str) {
+    let end = word.trim_end_matches(|c: char| c.is_ascii_punctuation());
+    let punct = &word[end.len()..];
+    (end, punct)
+}
+
+#[cfg(test)]
+#[path = "spelling_tests.rs"]
+mod tests;

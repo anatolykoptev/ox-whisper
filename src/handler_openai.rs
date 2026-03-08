@@ -58,6 +58,10 @@ pub async fn transcriptions(
             if upload.smart_format {
                 r.text = crate::smart_format::smart_format(&r.text, &detected_lang);
             }
+            if !upload.keywords.is_empty() {
+                r.text = crate::spelling::apply_keyword_boost(&r.text, &upload.keywords, upload.keywords_boost);
+                crate::spelling::apply_keyword_boost_to_words(&mut r.words, &upload.keywords, upload.keywords_boost);
+            }
             if !upload.pii_types.is_empty() {
                 let redactor = crate::pii::PiiRedactor::new();
                 r.text = redactor.redact_text(&r.text, &upload.pii_types, upload.pii_format);
@@ -103,6 +107,8 @@ struct OpenAIUpload {
     smart_format: bool,
     pii_types: Vec<crate::pii::PiiEntityType>,
     pii_format: crate::pii::RedactFormat,
+    keywords: Vec<String>,
+    keywords_boost: f64,
     extra: Option<serde_json::Value>,
 }
 
@@ -115,6 +121,8 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
     let mut smart_format_flag = false;
     let mut pii_types = Vec::new();
     let mut pii_format = crate::pii::RedactFormat::default();
+    let mut keywords: Vec<String> = Vec::new();
+    let mut keywords_boost: f64 = 0.8;
     let mut extra: Option<serde_json::Value> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -165,6 +173,16 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
                     _ => crate::pii::RedactFormat::Marker,
                 };
             }
+            "keywords" => {
+                let val = field.text().await.unwrap_or_default();
+                if let Ok(kw) = serde_json::from_str::<Vec<String>>(&val) {
+                    keywords = kw;
+                }
+            }
+            "keywords_boost" => {
+                let val = field.text().await.unwrap_or_default();
+                keywords_boost = val.parse().unwrap_or(0.8);
+            }
             "extra" => {
                 let val = field.text().await.unwrap_or_default();
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&val) {
@@ -185,6 +203,8 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
         smart_format: smart_format_flag,
         pii_types,
         pii_format,
+        keywords,
+        keywords_boost,
         extra,
     })
 }

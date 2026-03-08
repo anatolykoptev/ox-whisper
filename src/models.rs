@@ -129,12 +129,16 @@ fn load_nemo_ctc(config: &Config, model: &str, tokens: &str) -> Option<Pool<RuRe
 }
 
 fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecognizer>> {
+    let model_type = detect_transducer_type(encoder_path);
+    let decoder_path = find_model_file(&config.ru_models_dir, "decoder");
+    let joiner_path = find_model_file(&config.ru_models_dir, "joiner");
     let transducer_cfg = TransducerConfig {
         encoder: encoder_path.to_string(),
-        decoder: format!("{}/decoder.int8.onnx", config.ru_models_dir),
-        joiner: format!("{}/joiner.int8.onnx", config.ru_models_dir),
+        decoder: decoder_path,
+        joiner: joiner_path,
         tokens: format!("{}/tokens.txt", config.ru_models_dir),
         num_threads: config.num_threads,
+        model_type,
         provider: Some(config.provider.clone()),
         ..Default::default()
     };
@@ -142,7 +146,7 @@ fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecogniz
     for i in 0..config.pool_size {
         match TransducerRecognizer::new(transducer_cfg.clone()) {
             Ok(r) => {
-                tracing::info!("RU Zipformer {}/{} loaded", i + 1, config.pool_size);
+                tracing::info!("RU Transducer ({}) {}/{} loaded", transducer_cfg.model_type, i + 1, config.pool_size);
                 recognizers.push(RuRecognizer::Transducer(r));
             }
             Err(e) => {
@@ -152,6 +156,28 @@ fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecogniz
         }
     }
     if recognizers.is_empty() { None } else { Some(Pool::new(recognizers)) }
+}
+
+/// Detect transducer model type from encoder ONNX metadata.
+/// Returns "nemo_transducer" for GigaAM/NeMo models, "transducer" otherwise.
+fn detect_transducer_type(encoder_path: &str) -> String {
+    // Check for NeMo metadata markers via file content scan.
+    // NeMo transducer encoders contain "EncDecRNNTBPEModel" or "is_giga_am" in metadata.
+    if let Ok(data) = std::fs::read(encoder_path) {
+        let haystack = String::from_utf8_lossy(&data);
+        if haystack.contains("EncDecRNNTBPEModel") || haystack.contains("is_giga_am") {
+            tracing::info!("Detected NeMo transducer model (GigaAM)");
+            return "nemo_transducer".to_string();
+        }
+    }
+    "transducer".to_string()
+}
+
+/// Find decoder/joiner model file, preferring .int8.onnx over .onnx.
+fn find_model_file(dir: &str, name: &str) -> String {
+    let int8 = format!("{}/{}.int8.onnx", dir, name);
+    if Path::new(&int8).exists() { return int8; }
+    format!("{}/{}.onnx", dir, name)
 }
 
 fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {

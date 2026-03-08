@@ -18,6 +18,7 @@ mod openai;
 mod pool;
 mod punctuate;
 mod recognizer;
+mod spelling;
 mod streaming;
 mod transcribe;
 mod vad;

@@ -50,7 +50,13 @@ pub async fn transcriptions(
     let _ = std::fs::remove_file(&file_path);
 
     match result {
-        Ok(r) => format_response(format, &r, &detected_lang, want_words, lang_confidence),
+        Ok(mut r) => {
+            if !upload.custom_spelling.is_empty() {
+                r.text = crate::spelling::apply_spelling(&r.text, &upload.custom_spelling);
+                crate::spelling::apply_spelling_to_words(&mut r.words, &upload.custom_spelling);
+            }
+            format_response(format, &r, &detected_lang, want_words, lang_confidence)
+        }
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -85,6 +91,7 @@ struct OpenAIUpload {
     language: String,
     response_format: ResponseFormat,
     want_words: bool,
+    custom_spelling: Vec<crate::spelling::SpellingRule>,
 }
 
 async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, String> {
@@ -92,6 +99,7 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
     let mut language = String::new();
     let mut response_format = ResponseFormat::default();
     let mut want_words = false;
+    let mut custom_spelling = Vec::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
@@ -120,6 +128,12 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
                     want_words = true;
                 }
             }
+            "custom_spelling" => {
+                let val = field.text().await.unwrap_or_default();
+                if let Ok(rules) = serde_json::from_str::<Vec<crate::spelling::SpellingRule>>(&val) {
+                    custom_spelling = rules;
+                }
+            }
             // model, temperature, prompt — accepted but ignored
             _ => { let _ = field.bytes().await; }
         }
@@ -130,6 +144,7 @@ async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUpload, 
         language: normalize_language(&language),
         response_format,
         want_words,
+        custom_spelling,
     })
 }
 

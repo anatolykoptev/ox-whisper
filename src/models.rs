@@ -139,6 +139,9 @@ fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecogniz
         joiner: joiner_path,
         tokens: format!("{}/tokens.txt", config.ru_models_dir),
         num_threads: config.num_threads,
+        sample_rate: 16000,
+        feature_dim: 80,
+        decoding_method: "greedy_search".to_string(),
         model_type,
         provider: Some(config.provider.clone()),
         ..Default::default()

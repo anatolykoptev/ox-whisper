@@ -95,7 +95,19 @@ fn word_level_redaction() {
     let mut words = vec![word("call"), word("john@example.com")];
     r.redact_words(&mut words, &[PiiEntityType::Email], RedactFormat::Marker);
     assert_eq!(words[0].word, "call");
-    assert_eq!(words[1].word, "[EMAIL]");
+    assert_eq!(words[1].word, "[EMAIL_1]");
+}
+
+#[test]
+fn mixed_entity_types() {
+    let r = PiiRedactor::new();
+    let out = r.redact_text(
+        "contact john@example.com or call (555) 123-4567",
+        &[PiiEntityType::Email, PiiEntityType::Phone],
+        RedactFormat::Marker,
+    );
+    assert!(out.contains("[EMAIL_1]"), "got: {out}");
+    assert!(out.contains("[PHONE_1]"), "got: {out}");
 }
 
 #[test]

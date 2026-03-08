@@ -4,7 +4,7 @@ use regex::Regex;
 
 use crate::words::WordTimestamp;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PiiEntityType {
     Phone,
     Email,
@@ -40,7 +40,7 @@ pub struct PiiRedactor {
 impl PiiRedactor {
     pub fn new() -> Self {
         Self {
-            phone_us: Regex::new(r"\+?1?[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}").unwrap(),
+            phone_us: Regex::new(r"(?:\+1[\s.\-]?|\b)\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b").unwrap(),
             phone_ru: Regex::new(r"(?:\+7|8)[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{2}[\s.\-]?\d{2}").unwrap(),
             email: Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}").unwrap(),
             ssn: Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap(),
@@ -88,15 +88,19 @@ impl PiiRedactor {
         types: &[PiiEntityType],
         format: RedactFormat,
     ) {
+        use std::collections::HashMap;
+        let mut counters: HashMap<PiiEntityType, u32> = HashMap::new();
         for word in words.iter_mut() {
-            for &ty in types {
+            'outer: for &ty in types {
                 for re in self.patterns_for(ty) {
                     if re.is_match(&word.word) {
                         if ty == PiiEntityType::CreditCard && !luhn_check(&word.word) {
                             continue;
                         }
-                        word.word = replacement(entity_label(ty), 0, format);
-                        break;
+                        let c = counters.entry(ty).or_insert(0);
+                        *c += 1;
+                        word.word = replacement(entity_label(ty), *c, format);
+                        break 'outer;
                     }
                 }
             }

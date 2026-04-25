@@ -1,15 +1,21 @@
-# Stage 1: Build
-FROM rust:1.88-bookworm AS builder
+# syntax=docker/dockerfile:1.4
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake libclang-dev pkg-config && \
-    rm -rf /var/lib/apt/lists/*
-
+# Stage 1: Chef
+FROM rust:1.88-bookworm AS chef
+RUN apt-get update && apt-get install -y --no-install-recommends cmake libclang-dev pkg-config && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
-# Copy vendored dependencies first for layer caching
+# Stage 2: Planner
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 3: Builder
+FROM chef AS builder
+
+# Copy vendored deps first (rarely changes)
 COPY vendor/ vendor/
-COPY Cargo.toml Cargo.lock ./
 
 # Optimize sherpa-onnx session: enable ORT_ENABLE_ALL graph optimizations, set inter_op=1
 RUN sed -i \
@@ -18,16 +24,22 @@ RUN sed -i \
     -e 's/ORT_ENABLE_EXTENDED/ORT_ENABLE_ALL/' \
     vendor/sherpa-rs-sys/sherpa-onnx/sherpa-onnx/csrc/session.cc
 
-# Build deps only (dummy main)
-RUN mkdir src && echo "fn main(){}" > src/main.rs && \
-    SHERPA_LIB_PATH=/app/vendor/sherpa-onnx cargo build --release && \
-    rm -rf src target/release/deps/ox_whisper* target/release/ox-whisper
+# Cook deps (cached layer)
+COPY --from=planner /app/recipe.json recipe.json
+COPY Cargo.toml Cargo.lock ./
+ENV SHERPA_LIB_PATH=/app/vendor/sherpa-onnx
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo chef cook --release --locked --recipe-path recipe.json
 
 # Build actual binary
 COPY src/ src/
-RUN SHERPA_LIB_PATH=/app/vendor/sherpa-onnx cargo build --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked && \
+    cp target/release/ox-whisper /binary
 
-# Stage 2: Runtime
+# Stage 4: Runtime
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,7 +52,7 @@ COPY vendor/sherpa-onnx/lib/libsherpa-onnx-cxx-api.so /usr/lib/
 COPY vendor/sherpa-onnx/lib/libonnxruntime.so /usr/lib/
 RUN ldconfig
 
-COPY --from=builder /app/target/release/ox-whisper /usr/local/bin/ox-whisper
+COPY --from=builder /binary /usr/local/bin/ox-whisper
 
 ENV MOONSHINE_PORT=8092
 ENV MOONSHINE_MODELS_DIR=/models

@@ -1,2 +1,7 @@
 target/
 .git/
+models/
+docs/
+*.md
+.gitignore
+.github/

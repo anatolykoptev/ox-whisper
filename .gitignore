@@ -9,3 +9,4 @@ vendor/sherpa-rs/.cargo_vcs_info.json
 vendor/sherpa-rs/Cargo.lock
 vendor/sherpa-rs/Cargo.toml.orig
 vendor/sherpa-rs/README.md
+models/

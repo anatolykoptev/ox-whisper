@@ -1,0 +1,27 @@
+# Minimal docker-compose.yml for self-hosting ox-whisper.
+# Generated/used by install.sh. Manual users: pin OX_WHISPER_VERSION, override paths.
+
+services:
+  ox-whisper:
+    image: ghcr.io/anatolykoptev/ox-whisper:${OX_WHISPER_VERSION:-latest}
+    container_name: ox-whisper
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8092:8092"   # transcription HTTP + WS
+      - "127.0.0.1:9092:9092"   # Prometheus /metrics
+    environment:
+      MOONSHINE_PORT: "8092"
+      OXWHISPER_PROM_PORT: "9092"
+      MOONSHINE_THREADS: "${OX_WHISPER_THREADS:-4}"
+      POOL_SIZE: "${OX_WHISPER_POOL_SIZE:-2}"
+      RUST_LOG: "${OX_WHISPER_LOG:-info}"
+    volumes:
+      - ${OX_WHISPER_MODELS:-./models}/en:/models:ro
+      - ${OX_WHISPER_MODELS:-./models}/ru:/ru-models:ro
+      - ${OX_WHISPER_MODELS:-./models}/vad:/vad:ro
+      - ${OX_WHISPER_MODELS:-./models}/punct-en:/punct:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8092/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

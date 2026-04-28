@@ -31,9 +31,15 @@ pub async fn serve(handle: PrometheusHandle, addr: SocketAddr) {
             async move { h.render() }
         }),
     );
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("metrics listener bind failed");
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("metrics listener bind failed on {addr}: {e}");
+            return;
+        }
+    };
     tracing::info!("metrics endpoint on http://{addr}/metrics");
-    axum::serve(listener, app).await.expect("metrics server crashed");
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("metrics server stopped: {e}");
+    }
 }

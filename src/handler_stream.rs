@@ -12,11 +12,17 @@ pub async fn transcribe_stream(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+    let endpoint = "transcribe_stream";
+    let start = std::time::Instant::now();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
     let upload = match parse_upload(&mut multipart).await {
         Ok(u) => u,
         Err(msg) => {
+            metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
+                .increment(1);
+            metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+                .record(start.elapsed().as_secs_f64());
             let data = serde_json::json!({"type": "error", "message": msg});
             let _ = tx.send(Ok(Event::default().data(data.to_string()))).await;
             drop(tx);
@@ -59,6 +65,10 @@ pub async fn transcribe_stream(
 
         match result {
             Ok(Ok(r)) => {
+                metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "ok")
+                    .increment(1);
+                metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+                    .record(start.elapsed().as_secs_f64());
                 let data = serde_json::json!({
                     "type": "done",
                     "text": r.text,
@@ -68,10 +78,18 @@ pub async fn transcribe_stream(
                 let _ = tx.send(Ok(Event::default().data(data.to_string()))).await;
             }
             Ok(Err(e)) => {
+                metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
+                    .increment(1);
+                metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+                    .record(start.elapsed().as_secs_f64());
                 let data = serde_json::json!({"type": "error", "message": e.to_string()});
                 let _ = tx.send(Ok(Event::default().data(data.to_string()))).await;
             }
             Err(e) => {
+                metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
+                    .increment(1);
+                metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+                    .record(start.elapsed().as_secs_f64());
                 let data = serde_json::json!({"type": "error", "message": e.to_string()});
                 let _ = tx.send(Ok(Event::default().data(data.to_string()))).await;
             }

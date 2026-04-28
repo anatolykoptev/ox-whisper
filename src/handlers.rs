@@ -94,6 +94,9 @@ pub async fn transcribe_json(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TranscribeRequest>,
 ) -> Json<TranscribeResponse> {
+    let endpoint = "transcribe_json";
+    let start = std::time::Instant::now();
+
     let language = normalize_language(&req.language);
     let audio_path = req.audio_path.clone();
     let vad = req.vad;
@@ -107,6 +110,12 @@ pub async fn transcribe_json(
         )
     }).await.unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
 
+    let status = if result.is_ok() { "ok" } else { "err" };
+    metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
+        .increment(1);
+    metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+        .record(start.elapsed().as_secs_f64());
+
     to_response(result)
 }
 
@@ -114,6 +123,9 @@ pub async fn transcribe_upload(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Json<TranscribeResponse> {
+    let endpoint = "transcribe_upload";
+    let start = std::time::Instant::now();
+
     match parse_upload(&mut multipart).await {
         Ok(upload) => {
             let path = upload.file_path;
@@ -131,13 +143,24 @@ pub async fn transcribe_upload(
             }).await.unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
 
             let _ = std::fs::remove_file(&path);
+            let status = if result.is_ok() { "ok" } else { "err" };
+            metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
+                .increment(1);
+            metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+                .record(start.elapsed().as_secs_f64());
             to_response(result)
         }
-        Err(msg) => Json(TranscribeResponse {
-            text: String::new(), chunks: Vec::new(),
-            duration_ms: 0.0, speech_ms: 0.0,
-            words: Vec::new(), confidence: None, error: Some(msg),
-        }),
+        Err(msg) => {
+            metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
+                .increment(1);
+            metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+                .record(start.elapsed().as_secs_f64());
+            Json(TranscribeResponse {
+                text: String::new(), chunks: Vec::new(),
+                duration_ms: 0.0, speech_ms: 0.0,
+                words: Vec::new(), confidence: None, error: Some(msg),
+            })
+        }
     }
 }
 

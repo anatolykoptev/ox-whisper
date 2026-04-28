@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/anatolykoptev/ox-whisper/compare/v0.6.0...v0.6.1) (2026-04-28)
+
+
+### Bug Fixes
+
+* **dockerfile:** bust cargo-chef stub binary before final link ([#10](https://github.com/anatolykoptev/ox-whisper/issues/10)) ([5ba9508](https://github.com/anatolykoptev/ox-whisper/commit/5ba95086b36c1dfa6a32ff95633dd4a8d7374b13))
+
 ## [0.6.0](https://github.com/anatolykoptev/ox-whisper/compare/ox-whisper-v0.5.0...ox-whisper-v0.6.0) (2026-04-28)
 
 

@@ -2,7 +2,11 @@
 .env
 docs/plans/
 vendor/sherpa-onnx/lib/lib/
-vendor/sherpa-rs-sys/
+# Minimum-vendor: commit Rust binding files only; the upstream sherpa-onnx
+# C++ submodule (~555 MB) stays out of the repo. build.rs falls back to
+# pre-generated src/bindings.rs and skips the source copy when the dir
+# is absent (CI build).
+vendor/sherpa-rs-sys/sherpa-onnx/
 vendor/sherpa-rs/.cargo-ok
 vendor/sherpa-rs/.cargo_vcs_info.json
 vendor/sherpa-rs/Cargo.lock

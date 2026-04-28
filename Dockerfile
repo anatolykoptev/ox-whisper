@@ -32,12 +32,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     cargo chef cook --release --locked --recipe-path recipe.json
 
-# Build actual binary
+# Build actual binary. Touch src/main.rs to bust cargo's fingerprint
+# (cargo-chef cook left a stub binary at target/release/ox-whisper in the
+# cache mount; without a source-newer-than-binary signal, cargo skips link).
 COPY src/ src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    cargo build --release --locked && \
-    cp target/release/ox-whisper /binary
+    touch src/main.rs && \
+    rm -f /app/target/release/ox-whisper && \
+    cargo build --release --locked --bin ox-whisper && \
+    cp target/release/ox-whisper /binary && \
+    test "$(stat -c %s /binary)" -gt 1000000 || (echo "ERROR: binary too small ($(stat -c %s /binary) bytes), build did not link"; exit 1)
 
 # Stage 4: Runtime
 FROM debian:bookworm-slim

@@ -67,13 +67,22 @@ For comparison — `faster-whisper tiny int8` clocks RTF ≈ 0.075, `whisper.cpp
 
 ## Quick start
 
-### Docker
+One-line install (Linux aarch64, requires Docker — auto-installs if missing):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anatolykoptev/ox-whisper/master/install.sh | bash
+```
+
+This downloads `docker-compose.yml`, fetches ~463 MB of ASR models, pulls `ghcr.io/anatolykoptev/ox-whisper:latest`, and starts the container on port `8092` (HTTP/WS) + `9092` (metrics).
+
+### Manual Docker
 
 ```bash
 docker run -d \
   --name ox-whisper \
   --restart unless-stopped \
   -p 127.0.0.1:8092:8092 \
+  -p 127.0.0.1:9092:9092 \
   -v $(pwd)/models/en:/models:ro \
   -v $(pwd)/models/ru:/ru-models:ro \
   -v $(pwd)/models/vad:/vad:ro \
@@ -81,30 +90,7 @@ docker run -d \
   ghcr.io/anatolykoptev/ox-whisper:latest
 ```
 
-Image size ≈ 760 MB (sherpa-onnx + ONNX Runtime). Models are mounted read-only — see [Models](#models) for download links.
-
-### docker compose
-
-```yaml
-services:
-  ox-whisper:
-    image: ghcr.io/anatolykoptev/ox-whisper:latest
-    ports:
-      - "127.0.0.1:8092:8092"
-    volumes:
-      - ./models/en:/models:ro
-      - ./models/ru:/ru-models:ro
-      - ./models/vad:/vad:ro
-      - ./models/punct-en:/punct:ro
-    environment:
-      MOONSHINE_THREADS: "4"
-      POOL_SIZE: "2"
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8092/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-```
+Models can be downloaded separately via `scripts/download-models.sh`.
 
 ## API
 

@@ -14,6 +14,7 @@ mod formats;
 mod handler_openai;
 mod handler_stream;
 mod handlers;
+mod metrics;
 mod models;
 mod openai;
 mod paragraphs;
@@ -48,6 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
     let port = config.port;
     let max_body_size = config.max_body_size_mb * 1024 * 1024;
+
+    let prom_handle = metrics::install_recorder();
+    let prom_addr: std::net::SocketAddr = format!("0.0.0.0:{}", config.prom_port)
+        .parse()
+        .expect("invalid prom_port");
+    tokio::spawn(metrics::serve(prom_handle, prom_addr));
 
     tracing::info!("Loading models...");
     let models = Models::load(&config);

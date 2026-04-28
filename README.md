@@ -171,6 +171,32 @@ async def stream():
         ...
 ```
 
+## Metrics
+
+Prometheus `/metrics` on port `9092` (override via `OXWHISPER_PROM_PORT`).
+
+| Metric | Type | Labels |
+|---|---|---|
+| `oxwhisper_requests_total` | counter | `endpoint`, `status` |
+| `oxwhisper_request_duration_seconds` | histogram | `endpoint` |
+| `oxwhisper_transcribe_duration_seconds` | histogram | `lang` |
+| `oxwhisper_audio_duration_seconds` | histogram | — |
+| `oxwhisper_vad_speech_ratio` | gauge | `lang` |
+| `oxwhisper_chunks_total` | counter | `lang` |
+| `oxwhisper_hallucination_rejected_total` | counter | `lang` |
+| `oxwhisper_recognizer_pool_size` | gauge | `lang` |
+| `oxwhisper_recognizer_pool_busy` | gauge | `lang` |
+| `oxwhisper_ws_active_connections` | gauge | — |
+
+Scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: ox-whisper
+    static_configs:
+      - targets: ['ox-whisper:9092']
+```
+
 ## Models
 
 | Model | Languages | Size | Source |

@@ -64,6 +64,7 @@ ENV DIARIZE_SEGMENTATION_MODEL=/diarize/segmentation.onnx
 ENV DIARIZE_EMBEDDING_MODEL=/diarize/embedding.onnx
 
 EXPOSE 8092
+EXPOSE 9092
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=3 \
     CMD curl -sf http://localhost:8092/health || exit 1

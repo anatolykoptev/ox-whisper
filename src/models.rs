@@ -8,6 +8,7 @@ use sherpa_rs::silero_vad::{SileroVad, SileroVadConfig};
 use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 
 use crate::config::Config;
+use crate::metrics::names as metric_names;
 use crate::pool::Pool;
 use crate::recognizer::RuRecognizer;
 
@@ -88,7 +89,10 @@ fn load_moonshine(config: &Config) -> Option<Pool<MoonshineRecognizer>> {
     if recognizers.is_empty() {
         None
     } else {
-        Some(Pool::new(recognizers))
+        let size = recognizers.len();
+        let pool = Pool::new(recognizers);
+        metrics::gauge!(metric_names::POOL_SIZE, "lang" => "en").set(size as f64);
+        Some(pool)
     }
 }
 
@@ -130,7 +134,14 @@ fn load_nemo_ctc(config: &Config, model: &str, tokens: &str) -> Option<Pool<RuRe
             }
         }
     }
-    if recognizers.is_empty() { None } else { Some(Pool::new(recognizers)) }
+    if recognizers.is_empty() {
+        None
+    } else {
+        let size = recognizers.len();
+        let pool = Pool::new(recognizers);
+        metrics::gauge!(metric_names::POOL_SIZE, "lang" => "ru").set(size as f64);
+        Some(pool)
+    }
 }
 
 fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecognizer>> {
@@ -170,7 +181,14 @@ fn load_zipformer(config: &Config, encoder_path: &str) -> Option<Pool<RuRecogniz
             }
         }
     }
-    if recognizers.is_empty() { None } else { Some(Pool::new(recognizers)) }
+    if recognizers.is_empty() {
+        None
+    } else {
+        let size = recognizers.len();
+        let pool = Pool::new(recognizers);
+        metrics::gauge!(metric_names::POOL_SIZE, "lang" => "ru").set(size as f64);
+        Some(pool)
+    }
 }
 
 /// Detect transducer model type from encoder ONNX metadata.

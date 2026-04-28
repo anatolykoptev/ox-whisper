@@ -21,9 +21,18 @@ pub async fn transcriptions(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Response {
+    let endpoint = "openai_transcriptions";
+    let start = std::time::Instant::now();
+
     let upload = match upload::parse_openai_upload(&mut multipart).await {
         Ok(u) => u,
-        Err(msg) => return error_response(StatusCode::BAD_REQUEST, &msg),
+        Err(msg) => {
+            metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
+                .increment(1);
+            metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+                .record(start.elapsed().as_secs_f64());
+            return error_response(StatusCode::BAD_REQUEST, &msg);
+        }
     };
 
     let file_path = upload.file_path.clone();
@@ -49,7 +58,7 @@ pub async fn transcriptions(
     .await
     .unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
 
-    let response = match result {
+    let (response, ok) = match result {
         Ok(mut r) => {
             if upload.diarize && state.models.diarize.is_some() {
                 run_diarization(&state, &file_path, &mut r, upload.diarize_speakers).await;
@@ -60,10 +69,16 @@ pub async fn transcriptions(
             } else {
                 vec![]
             };
-            format_response(format, &r, &detected_lang, want_words, lang_confidence, upload.extra, utterances)
+            (format_response(format, &r, &detected_lang, want_words, lang_confidence, upload.extra, utterances), true)
         }
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => (error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()), false),
     };
+
+    let status = if ok { "ok" } else { "err" };
+    metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
+        .increment(1);
+    metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+        .record(start.elapsed().as_secs_f64());
 
     let _ = std::fs::remove_file(&file_path);
     response

@@ -2,6 +2,8 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::metrics::names;
+
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
@@ -56,8 +58,11 @@ pub fn transcribe(
     if needs_cleanup {
         let _ = std::fs::remove_file(&wav_path);
     }
+    let elapsed = start.elapsed().as_secs_f64();
+    metrics::histogram!(names::TRANSCRIBE_DURATION, "lang" => language.to_string())
+        .record(elapsed);
     let mut res = result?;
-    res.duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+    res.duration_ms = elapsed * 1000.0;
     Ok(res)
 }
 
@@ -69,6 +74,7 @@ fn do_transcribe(
     if config.max_audio_duration_s > 0.0 && duration > config.max_audio_duration_s {
         return Err(TranscribeError::TooLong(duration, config.max_audio_duration_s));
     }
+    metrics::histogram!(names::AUDIO_DURATION).record(duration);
 
     let use_vad = vad_override
         .unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
@@ -82,6 +88,12 @@ fn do_transcribe(
             let pct = if total_ms > 0.0 { 100.0 * vad_result.speech_ms / total_ms } else { 0.0 };
             tracing::info!("VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} chunk(s)",
                 vad_result.speech_ms, total_ms, pct, vad_result.chunks.len());
+            let ratio = vad_result.speech_ms / total_ms.max(1.0);
+            let chunks_count = vad_result.chunks.len();
+            metrics::gauge!(names::VAD_SPEECH_RATIO, "lang" => language.to_string())
+                .set(ratio);
+            metrics::counter!(names::CHUNKS_TOTAL, "lang" => language.to_string())
+                .increment(chunks_count as u64);
             (vad_result.chunks, vad_result.speech_ms)
         } else {
             (split_audio_chunks(samples, max_chunk_samples), 0.0)
@@ -124,6 +136,14 @@ fn transcribe_en(
     let pool = models.en.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
     let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
+    metrics::gauge!(names::POOL_BUSY, "lang" => "en").increment(1.0);
+    struct EnBusyGuard;
+    impl Drop for EnBusyGuard {
+        fn drop(&mut self) {
+            metrics::gauge!(names::POOL_BUSY, "lang" => "en").decrement(1.0);
+        }
+    }
+    let _busy = EnBusyGuard;
     let mut texts = Vec::new();
     let mut words = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
@@ -162,6 +182,8 @@ fn transcribe_en(
                 }
             }
             tracing::warn!("EN chunk {}: ratio {:.2}, skip: {:?}", i, ratio, &text[..text.len().min(80)]);
+            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "en")
+                .increment(1);
         } else {
             extract_or_estimate(&result.tokens, &result.timestamps, &result.log_probs, &text, chunk.len(), offset, &mut words);
             texts.push(text);
@@ -177,6 +199,14 @@ fn transcribe_ru(
     let pool = models.ru.as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
     let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
+    metrics::gauge!(names::POOL_BUSY, "lang" => "ru").increment(1.0);
+    struct RuBusyGuard;
+    impl Drop for RuBusyGuard {
+        fn drop(&mut self) {
+            metrics::gauge!(names::POOL_BUSY, "lang" => "ru").decrement(1.0);
+        }
+    }
+    let _busy = RuBusyGuard;
     let chunk_refs: Vec<&[f32]> = chunks.iter().map(|c| c.as_slice()).collect();
     let results = rec.transcribe_batch(16000, &chunk_refs);
 
@@ -184,7 +214,12 @@ fn transcribe_ru(
     let mut words = Vec::new();
     for (i, r) in results.into_iter().enumerate() {
         let t = r.text.trim().to_string();
-        if t.is_empty() || compression_ratio(&t) > threshold { continue; }
+        if t.is_empty() { continue; }
+        if compression_ratio(&t) > threshold {
+            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "ru")
+                .increment(1);
+            continue;
+        }
         let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
 
         extract_or_estimate(&r.tokens, &r.timestamps, &r.log_probs, &t, chunks[i].len(), offset, &mut words);

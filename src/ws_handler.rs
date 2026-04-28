@@ -12,6 +12,19 @@ use crate::ws_types::{ClientMessage, ServerMessage, WsParams};
 
 const INTERIM_INTERVAL_S: f32 = 2.0;
 
+struct WsConnGuard {
+    start: std::time::Instant,
+}
+impl Drop for WsConnGuard {
+    fn drop(&mut self) {
+        metrics::gauge!(crate::metrics::names::WS_ACTIVE).decrement(1.0);
+        metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => "ws_listen", "status" => "ok")
+            .increment(1);
+        metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => "ws_listen")
+            .record(self.start.elapsed().as_secs_f64());
+    }
+}
+
 pub async fn ws_listen(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WsParams>,
@@ -21,6 +34,10 @@ pub async fn ws_listen(
 }
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams) {
+    let start = std::time::Instant::now();
+    metrics::gauge!(crate::metrics::names::WS_ACTIVE).increment(1.0);
+    let _conn = WsConnGuard { start };
+
     let request_id = uuid::Uuid::new_v4().to_string();
     let model = if params.language == "ru" { "gigaam" } else { "moonshine-v2" };
 
@@ -150,6 +167,14 @@ fn transcribe_with_pool_en(
 ) -> Option<(String, Vec<WordTimestamp>)> {
     let pool = models.en.as_ref()?;
     let mut rec = pool.acquire()?;
+    metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "en").increment(1.0);
+    struct EnBusyGuard;
+    impl Drop for EnBusyGuard {
+        fn drop(&mut self) {
+            metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "en").decrement(1.0);
+        }
+    }
+    let _busy = EnBusyGuard;
     let result = rec.transcribe(16000, samples);
     let text = result.text.trim().to_string();
     if text.is_empty() || compression_ratio(&text) > threshold { return None; }
@@ -166,6 +191,14 @@ fn transcribe_with_pool_ru(
 ) -> Option<(String, Vec<WordTimestamp>)> {
     let pool = models.ru.as_ref()?;
     let mut rec = pool.acquire()?;
+    metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "ru").increment(1.0);
+    struct RuBusyGuard;
+    impl Drop for RuBusyGuard {
+        fn drop(&mut self) {
+            metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "ru").decrement(1.0);
+        }
+    }
+    let _busy = RuBusyGuard;
     let result = rec.transcribe(16000, samples);
     let text = result.text.trim().to_string();
     if text.is_empty() || compression_ratio(&text) > threshold { return None; }

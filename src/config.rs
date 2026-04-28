@@ -44,6 +44,8 @@ pub struct Config {
     pub diarize_segmentation_model: String,
     /// Diarization embedding model path (DIARIZE_EMBEDDING_MODEL)
     pub diarize_embedding_model: String,
+    /// Prometheus metrics port (OXWHISPER_PROM_PORT, default: 9092)
+    pub prom_port: u16,
 }
 
 impl Config {
@@ -118,6 +120,10 @@ impl Config {
                 .unwrap_or_else(|_| "/diarize/segmentation.onnx".to_string()),
             diarize_embedding_model: env::var("DIARIZE_EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "/diarize/embedding.onnx".to_string()),
+            prom_port: env::var("OXWHISPER_PROM_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(9092),
         }
     }
 }

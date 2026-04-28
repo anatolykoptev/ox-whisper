@@ -14,15 +14,11 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 3: Builder
 FROM chef AS builder
 
-# Copy vendored deps first (rarely changes)
+# Copy vendored deps first (rarely changes). Minimum-vendor: only Rust
+# binding files of sherpa-rs-sys are tracked; the C++ submodule is absent.
+# build.rs uses pre-built libs from SHERPA_LIB_PATH and the committed
+# src/bindings.rs — no C++ compile, so no sed patch needed.
 COPY vendor/ vendor/
-
-# Optimize sherpa-onnx session: enable ORT_ENABLE_ALL graph optimizations, set inter_op=1
-RUN sed -i \
-    -e 's/SetInterOpNumThreads(num_threads)/SetInterOpNumThreads(1)/' \
-    -e 's|// sess_opts.SetGraphOptimizationLevel|sess_opts.SetGraphOptimizationLevel|' \
-    -e 's/ORT_ENABLE_EXTENDED/ORT_ENABLE_ALL/' \
-    vendor/sherpa-rs-sys/sherpa-onnx/sherpa-onnx/csrc/session.cc
 
 # Cook deps (cached layer)
 COPY --from=planner /app/recipe.json recipe.json

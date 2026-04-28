@@ -14,10 +14,22 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 3: Builder
 FROM chef AS builder
 
-# Copy vendored deps first (rarely changes)
+# Copy vendored deps first (rarely changes). vendor/sherpa-rs-sys/ is gitignored
+# (556 MB upstream submodule), so it is missing in CI clones — pull the 15 MB
+# crates.io tarball at build time. Local dev keeps using the existing on-disk copy.
 COPY vendor/ vendor/
+RUN if [ ! -d vendor/sherpa-rs-sys ]; then \
+      curl -fsSL -A "ox-whisper-build" \
+        "https://crates.io/api/v1/crates/sherpa-rs-sys/0.6.8/download" \
+        -o /tmp/sherpa-rs-sys.tar.gz && \
+      tar -xzf /tmp/sherpa-rs-sys.tar.gz -C /tmp && \
+      mv /tmp/sherpa-rs-sys-0.6.8 vendor/sherpa-rs-sys && \
+      rm /tmp/sherpa-rs-sys.tar.gz; \
+    fi
 
-# Optimize sherpa-onnx session: enable ORT_ENABLE_ALL graph optimizations, set inter_op=1
+# Optimize sherpa-onnx session: enable ORT_ENABLE_ALL graph optimizations, set inter_op=1.
+# No-op when SHERPA_LIB_PATH points at pre-built libs (build.rs skips C++ compile),
+# kept for safety in case someone unsets the env to fall back to source build.
 RUN sed -i \
     -e 's/SetInterOpNumThreads(num_threads)/SetInterOpNumThreads(1)/' \
     -e 's|// sess_opts.SetGraphOptimizationLevel|sess_opts.SetGraphOptimizationLevel|' \

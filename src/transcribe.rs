@@ -182,7 +182,7 @@ fn transcribe_en(
                 }
             }
             tracing::warn!("EN chunk {}: ratio {:.2}, skip: {:?}", i, ratio, &text[..text.len().min(80)]);
-            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => language.to_string())
+            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "en")
                 .increment(1);
         } else {
             extract_or_estimate(&result.tokens, &result.timestamps, &result.log_probs, &text, chunk.len(), offset, &mut words);
@@ -216,7 +216,7 @@ fn transcribe_ru(
         let t = r.text.trim().to_string();
         if t.is_empty() { continue; }
         if compression_ratio(&t) > threshold {
-            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "ru".to_string())
+            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "ru")
                 .increment(1);
             continue;
         }

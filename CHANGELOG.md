@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/anatolykoptev/ox-whisper/compare/v0.6.1...v0.7.0) (2026-05-09)
+
+
+### Features
+
+* **pool:** opt-in idle model eviction ([#19](https://github.com/anatolykoptev/ox-whisper/issues/19)) ([86e18fe](https://github.com/anatolykoptev/ox-whisper/commit/86e18fec36df7b2b34ee5529a75d0c8b3031bd39))
+
 ## [0.6.1](https://github.com/anatolykoptev/ox-whisper/compare/v0.6.0...v0.6.1) (2026-04-28)
 
 

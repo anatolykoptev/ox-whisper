@@ -14,6 +14,11 @@ pub mod names {
     pub const POOL_SIZE: &str = "oxwhisper_recognizer_pool_size";
     pub const POOL_BUSY: &str = "oxwhisper_recognizer_pool_busy";
     pub const WS_ACTIVE: &str = "oxwhisper_ws_active_connections";
+    pub const POOL_EVICTIONS: &str = "oxwhisper_pool_evictions_total";
+    pub const POOL_COLD_STARTS: &str = "oxwhisper_pool_cold_starts_total";
+    pub const POOL_REINIT_FAILURES: &str = "oxwhisper_pool_reinit_failures_total";
+    pub const POOL_EVICTION_LOOP_PANICS: &str = "oxwhisper_pool_eviction_loop_panics_total";
+    pub const POOL_MUTEX_POISONED: &str = "oxwhisper_pool_mutex_poisoned_total";
 }
 
 pub fn install_recorder() -> PrometheusHandle {

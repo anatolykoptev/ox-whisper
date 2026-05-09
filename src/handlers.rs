@@ -35,19 +35,28 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     let mut languages = HashMap::new();
     let en_ready = state.models.en.is_some();
     for lang in ["ar", "en", "es", "ja", "uk", "vi", "zh"] {
-        languages.insert(lang, LanguageInfo {
-            model: "moonshine-v2-base",
-            ready: en_ready,
-        });
+        languages.insert(
+            lang,
+            LanguageInfo {
+                model: "moonshine-v2-base",
+                ready: en_ready,
+            },
+        );
     }
-    let ru_model = state.models.ru.as_ref()
-        .and_then(|p| p.acquire())
+    let ru_model = state
+        .models
+        .ru
+        .as_ref()
+        .and_then(|p| p.acquire().ok())
         .map(|r| r.model_name())
         .unwrap_or("none");
-    languages.insert("ru", LanguageInfo {
-        model: ru_model,
-        ready: state.models.ru.is_some(),
-    });
+    languages.insert(
+        "ru",
+        LanguageInfo {
+            model: ru_model,
+            ready: state.models.ru.is_some(),
+        },
+    );
 
     Json(HealthResponse {
         status: "ok",
@@ -70,7 +79,9 @@ pub struct TranscribeRequest {
     pub punctuate: Option<bool>,
 }
 
-fn default_language() -> String { "en".to_string() }
+fn default_language() -> String {
+    "en".to_string()
+}
 
 #[derive(Serialize)]
 pub struct TranscribeResponse {
@@ -88,7 +99,9 @@ pub struct TranscribeResponse {
     pub error: Option<String>,
 }
 
-fn is_zero(v: &f64) -> bool { *v == 0.0 }
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
 
 pub async fn transcribe_json(
     State(state): State<Arc<AppState>>,
@@ -105,10 +118,17 @@ pub async fn transcribe_json(
 
     let result = tokio::task::spawn_blocking(move || {
         transcribe::transcribe(
-            &state.models, &state.config, Path::new(&audio_path), &language,
-            vad, punctuate, max_chunk_len,
+            &state.models,
+            &state.config,
+            Path::new(&audio_path),
+            &language,
+            vad,
+            punctuate,
+            max_chunk_len,
         )
-    }).await.unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
+    })
+    .await
+    .unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
 
     let status = if result.is_ok() { "ok" } else { "err" };
     metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
@@ -137,10 +157,17 @@ pub async fn transcribe_upload(
 
             let result = tokio::task::spawn_blocking(move || {
                 transcribe::transcribe(
-                    &state.models, &state.config, &p, &language,
-                    vad, punctuate, max_chunk_len,
+                    &state.models,
+                    &state.config,
+                    &p,
+                    &language,
+                    vad,
+                    punctuate,
+                    max_chunk_len,
                 )
-            }).await.unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
+            })
+            .await
+            .unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
 
             let _ = std::fs::remove_file(&path);
             let status = if result.is_ok() { "ok" } else { "err" };
@@ -156,9 +183,13 @@ pub async fn transcribe_upload(
             metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
                 .record(start.elapsed().as_secs_f64());
             Json(TranscribeResponse {
-                text: String::new(), chunks: Vec::new(),
-                duration_ms: 0.0, speech_ms: 0.0,
-                words: Vec::new(), confidence: None, error: Some(msg),
+                text: String::new(),
+                chunks: Vec::new(),
+                duration_ms: 0.0,
+                speech_ms: 0.0,
+                words: Vec::new(),
+                confidence: None,
+                error: Some(msg),
             })
         }
     }
@@ -183,8 +214,13 @@ pub(crate) async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "file" | "audio" => {
-                let ext = field.file_name()
-                    .and_then(|n| Path::new(n).extension().map(|e| e.to_string_lossy().to_string()))
+                let ext = field
+                    .file_name()
+                    .and_then(|n| {
+                        Path::new(n)
+                            .extension()
+                            .map(|e| e.to_string_lossy().to_string())
+                    })
                     .unwrap_or_else(|| "wav".to_string());
                 let tmp = format!("/tmp/{}.{}", uuid::Uuid::new_v4(), ext);
                 let data = field.bytes().await.map_err(|e| e.to_string())?;
@@ -193,7 +229,9 @@ pub(crate) async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData
             }
             "language" => language = field.text().await.unwrap_or_default(),
             "vad" => vad = field.text().await.unwrap_or_default().parse().ok(),
-            "max_chunk_len" => max_chunk_len = field.text().await.unwrap_or_default().parse().unwrap_or(0),
+            "max_chunk_len" => {
+                max_chunk_len = field.text().await.unwrap_or_default().parse().unwrap_or(0)
+            }
             "punctuate" => punctuate = field.text().await.unwrap_or_default().parse().ok(),
             _ => {}
         }
@@ -202,17 +240,19 @@ pub(crate) async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData
     Ok(UploadData {
         file_path: file_path.ok_or("missing 'file' or 'audio' field")?,
         language: normalize_language(&language),
-        vad, max_chunk_len, punctuate,
+        vad,
+        max_chunk_len,
+        punctuate,
     })
 }
 
-fn to_response(result: Result<transcribe::TranscribeResult, transcribe::TranscribeError>) -> Json<TranscribeResponse> {
+fn to_response(
+    result: Result<transcribe::TranscribeResult, transcribe::TranscribeError>,
+) -> Json<TranscribeResponse> {
     match result {
         Ok(r) => {
             let confidence = {
-                let confs: Vec<f32> = r.words.iter()
-                    .filter_map(|w| w.confidence)
-                    .collect();
+                let confs: Vec<f32> = r.words.iter().filter_map(|w| w.confidence).collect();
                 if confs.is_empty() {
                     None
                 } else {
@@ -220,20 +260,32 @@ fn to_response(result: Result<transcribe::TranscribeResult, transcribe::Transcri
                 }
             };
             Json(TranscribeResponse {
-                text: r.text, chunks: r.chunks,
-                duration_ms: r.duration_ms, speech_ms: r.speech_ms,
-                words: r.words, confidence, error: None,
+                text: r.text,
+                chunks: r.chunks,
+                duration_ms: r.duration_ms,
+                speech_ms: r.speech_ms,
+                words: r.words,
+                confidence,
+                error: None,
             })
         }
         Err(e) => Json(TranscribeResponse {
-            text: String::new(), chunks: Vec::new(),
-            duration_ms: 0.0, speech_ms: 0.0,
-            words: Vec::new(), confidence: None, error: Some(e.to_string()),
+            text: String::new(),
+            chunks: Vec::new(),
+            duration_ms: 0.0,
+            speech_ms: 0.0,
+            words: Vec::new(),
+            confidence: None,
+            error: Some(e.to_string()),
         }),
     }
 }
 
 fn normalize_language(lang: &str) -> String {
     let normalized = lang.trim().to_lowercase();
-    if normalized.is_empty() { "en".to_string() } else { normalized }
+    if normalized.is_empty() {
+        "en".to_string()
+    } else {
+        normalized
+    }
 }

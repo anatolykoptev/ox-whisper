@@ -13,12 +13,19 @@ use crate::config::Config;
 use crate::models::Models;
 use crate::punctuate::add_punctuation;
 use crate::vad::apply_vad;
-use crate::words::{WordTimestamp, compute_chunk_offsets, estimate_words_from_text, extract_words_with_confidence};
+use crate::words::{
+    WordTimestamp, compute_chunk_offsets, estimate_words_from_text, extract_words_with_confidence,
+};
 
 /// Try model timestamps first, fall back to proportional estimation.
 fn extract_or_estimate(
-    tokens: &[String], timestamps: &[f32], log_probs: &[f32],
-    text: &str, chunk_samples: usize, offset: f32, words: &mut Vec<WordTimestamp>,
+    tokens: &[String],
+    timestamps: &[f32],
+    log_probs: &[f32],
+    text: &str,
+    chunk_samples: usize,
+    offset: f32,
+    words: &mut Vec<WordTimestamp>,
 ) {
     let before = words.len();
     extract_words_with_confidence(tokens, timestamps, log_probs, offset, words);
@@ -49,49 +56,85 @@ pub struct TranscribeResult {
 }
 
 pub fn transcribe(
-    models: &Models, config: &Config, audio_path: &Path, language: &str,
-    vad_override: Option<bool>, punctuate_override: Option<bool>, max_chunk_len: usize,
+    models: &Models,
+    config: &Config,
+    audio_path: &Path,
+    language: &str,
+    vad_override: Option<bool>,
+    punctuate_override: Option<bool>,
+    max_chunk_len: usize,
 ) -> Result<TranscribeResult, TranscribeError> {
     let start = Instant::now();
     let (wav_path, needs_cleanup) = ensure_wav(audio_path)?;
-    let result = do_transcribe(models, config, &wav_path, language, vad_override, punctuate_override, max_chunk_len);
+    let result = do_transcribe(
+        models,
+        config,
+        &wav_path,
+        language,
+        vad_override,
+        punctuate_override,
+        max_chunk_len,
+    );
     if needs_cleanup {
         let _ = std::fs::remove_file(&wav_path);
     }
     let elapsed = start.elapsed().as_secs_f64();
-    metrics::histogram!(names::TRANSCRIBE_DURATION, "lang" => language.to_string())
-        .record(elapsed);
+    metrics::histogram!(names::TRANSCRIBE_DURATION, "lang" => language.to_string()).record(elapsed);
     let mut res = result?;
     res.duration_ms = elapsed * 1000.0;
     Ok(res)
 }
 
 fn do_transcribe(
-    models: &Models, config: &Config, wav_path: &Path, language: &str,
-    vad_override: Option<bool>, punctuate_override: Option<bool>, max_chunk_len: usize,
+    models: &Models,
+    config: &Config,
+    wav_path: &Path,
+    language: &str,
+    vad_override: Option<bool>,
+    punctuate_override: Option<bool>,
+    max_chunk_len: usize,
 ) -> Result<TranscribeResult, TranscribeError> {
     let (samples, duration) = load_wav(wav_path)?;
     if config.max_audio_duration_s > 0.0 && duration > config.max_audio_duration_s {
-        return Err(TranscribeError::TooLong(duration, config.max_audio_duration_s));
+        return Err(TranscribeError::TooLong(
+            duration,
+            config.max_audio_duration_s,
+        ));
     }
     metrics::histogram!(names::AUDIO_DURATION).record(duration);
 
-    let use_vad = vad_override
-        .unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
+    let use_vad =
+        vad_override.unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
 
     let max_chunk_samples = config.max_chunk_s * 16000;
     let (audio_chunks, speech_ms) = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
-            let mut vad = vad_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
-            let vad_result = apply_vad(&mut vad, &samples, 16000, config.vad_speech_pad_s, config.vad_max_chunk_s);
+            let mut vad = vad_mutex
+                .lock()
+                .map_err(|_| TranscribeError::NoRecognizer)?;
+            let vad_result = apply_vad(
+                &mut vad,
+                &samples,
+                16000,
+                config.vad_speech_pad_s,
+                config.vad_max_chunk_s,
+            );
             let total_ms = duration * 1000.0;
-            let pct = if total_ms > 0.0 { 100.0 * vad_result.speech_ms / total_ms } else { 0.0 };
-            tracing::info!("VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} chunk(s)",
-                vad_result.speech_ms, total_ms, pct, vad_result.chunks.len());
+            let pct = if total_ms > 0.0 {
+                100.0 * vad_result.speech_ms / total_ms
+            } else {
+                0.0
+            };
+            tracing::info!(
+                "VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} chunk(s)",
+                vad_result.speech_ms,
+                total_ms,
+                pct,
+                vad_result.chunks.len()
+            );
             let ratio = vad_result.speech_ms / total_ms.max(1.0);
             let chunks_count = vad_result.chunks.len();
-            metrics::gauge!(names::VAD_SPEECH_RATIO, "lang" => language.to_string())
-                .set(ratio);
+            metrics::gauge!(names::VAD_SPEECH_RATIO, "lang" => language.to_string()).set(ratio);
             metrics::counter!(names::CHUNKS_TOTAL, "lang" => language.to_string())
                 .increment(chunks_count as u64);
             (vad_result.chunks, vad_result.speech_ms)
@@ -115,27 +158,48 @@ fn do_transcribe(
     // Skip external punctuation for:
     // - EN: Moonshine v2 produces punctuated text natively (tokens include , . etc)
     // - RU with GigaAM v3 transducer: has built-in punctuation
-    let skip_punct = language != "ru" || models.ru.as_ref()
-        .and_then(|p| p.acquire())
-        .map(|r| r.has_builtin_punct())
-        .unwrap_or(false);
+    let skip_punct = language != "ru"
+        || models
+            .ru
+            .as_ref()
+            .and_then(|p| p.acquire().ok())
+            .map(|r| r.has_builtin_punct())
+            .unwrap_or(false);
     let text = if skip_punct {
         text
     } else {
         maybe_punctuate(models, &text, language, punctuate_override)
     };
-    let chunks = if max_chunk_len > 0 { split_text(&text, max_chunk_len) } else { Vec::new() };
+    let chunks = if max_chunk_len > 0 {
+        split_text(&text, max_chunk_len)
+    } else {
+        Vec::new()
+    };
 
-    Ok(TranscribeResult { text, chunks, duration_ms: 0.0, speech_ms, words })
+    Ok(TranscribeResult {
+        text,
+        chunks,
+        duration_ms: 0.0,
+        speech_ms,
+        words,
+    })
 }
 
 fn transcribe_en(
-    models: &Models, chunks: &[Vec<f32>], language: &str, chunk_offsets: &[f64],
+    models: &Models,
+    chunks: &[Vec<f32>],
+    language: &str,
+    chunk_offsets: &[f64],
     threshold: f64,
 ) -> Result<(Vec<String>, Vec<WordTimestamp>), TranscribeError> {
-    let pool = models.en.as_ref()
+    let pool = models
+        .en
+        .as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
-    let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
+    let mut rec = pool.acquire().map_err(|e| {
+        tracing::warn!("EN pool acquire failed: {e}");
+        TranscribeError::NoRecognizer
+    })?;
     metrics::gauge!(names::POOL_BUSY, "lang" => "en").increment(1.0);
     struct EnBusyGuard;
     impl Drop for EnBusyGuard {
@@ -160,7 +224,15 @@ fn transcribe_en(
                     let rt = retry.text.trim().to_string();
                     if !rt.is_empty() && compression_ratio(&rt) <= threshold {
                         let half_offset = offset + if j == 1 { mid as f32 / 16000.0 } else { 0.0 };
-                        extract_or_estimate(&retry.tokens, &retry.timestamps, &retry.log_probs, &rt, half.len(), half_offset, &mut words);
+                        extract_or_estimate(
+                            &retry.tokens,
+                            &retry.timestamps,
+                            &retry.log_probs,
+                            &rt,
+                            half.len(),
+                            half_offset,
+                            &mut words,
+                        );
                         texts.push(rt);
                     }
                 }
@@ -176,16 +248,36 @@ fn transcribe_en(
                 let rt = retry.text.trim().to_string();
                 if !rt.is_empty() && compression_ratio(&rt) <= threshold {
                     tracing::info!("EN chunk {}: retry ok (ratio {:.2} -> ok)", i, ratio);
-                    extract_or_estimate(&retry.tokens, &retry.timestamps, &retry.log_probs, &rt, chunk.len(), offset, &mut words);
+                    extract_or_estimate(
+                        &retry.tokens,
+                        &retry.timestamps,
+                        &retry.log_probs,
+                        &rt,
+                        chunk.len(),
+                        offset,
+                        &mut words,
+                    );
                     texts.push(rt);
                     continue;
                 }
             }
-            tracing::warn!("EN chunk {}: ratio {:.2}, skip: {:?}", i, ratio, &text[..text.len().min(80)]);
-            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "en")
-                .increment(1);
+            tracing::warn!(
+                "EN chunk {}: ratio {:.2}, skip: {:?}",
+                i,
+                ratio,
+                &text[..text.len().min(80)]
+            );
+            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "en").increment(1);
         } else {
-            extract_or_estimate(&result.tokens, &result.timestamps, &result.log_probs, &text, chunk.len(), offset, &mut words);
+            extract_or_estimate(
+                &result.tokens,
+                &result.timestamps,
+                &result.log_probs,
+                &text,
+                chunk.len(),
+                offset,
+                &mut words,
+            );
             texts.push(text);
         }
     }
@@ -193,12 +285,19 @@ fn transcribe_en(
 }
 
 fn transcribe_ru(
-    models: &Models, chunks: &[Vec<f32>], chunk_offsets: &[f64],
+    models: &Models,
+    chunks: &[Vec<f32>],
+    chunk_offsets: &[f64],
     threshold: f64,
 ) -> Result<(Vec<String>, Vec<WordTimestamp>), TranscribeError> {
-    let pool = models.ru.as_ref()
+    let pool = models
+        .ru
+        .as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
-    let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
+    let mut rec = pool.acquire().map_err(|e| {
+        tracing::warn!("RU pool acquire failed: {e}");
+        TranscribeError::NoRecognizer
+    })?;
     metrics::gauge!(names::POOL_BUSY, "lang" => "ru").increment(1.0);
     struct RuBusyGuard;
     impl Drop for RuBusyGuard {
@@ -214,15 +313,24 @@ fn transcribe_ru(
     let mut words = Vec::new();
     for (i, r) in results.into_iter().enumerate() {
         let t = r.text.trim().to_string();
-        if t.is_empty() { continue; }
+        if t.is_empty() {
+            continue;
+        }
         if compression_ratio(&t) > threshold {
-            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "ru")
-                .increment(1);
+            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "ru").increment(1);
             continue;
         }
         let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
 
-        extract_or_estimate(&r.tokens, &r.timestamps, &r.log_probs, &t, chunks[i].len(), offset, &mut words);
+        extract_or_estimate(
+            &r.tokens,
+            &r.timestamps,
+            &r.log_probs,
+            &t,
+            chunks[i].len(),
+            offset,
+            &mut words,
+        );
 
         texts.push(t);
     }
@@ -230,7 +338,10 @@ fn transcribe_ru(
 }
 
 pub(crate) fn maybe_punctuate(
-    models: &Models, text: &str, language: &str, punctuate_override: Option<bool>,
+    models: &Models,
+    text: &str,
+    language: &str,
+    punctuate_override: Option<bool>,
 ) -> String {
     let should = match punctuate_override {
         Some(v) => v,
@@ -238,7 +349,9 @@ pub(crate) fn maybe_punctuate(
     };
     if should {
         if let Some(ref m) = models.punct {
-            if let Ok(p) = m.lock() { return add_punctuation(&p, text); }
+            if let Ok(p) = m.lock() {
+                return add_punctuation(&p, text);
+            }
         }
     }
     text.to_string()
@@ -248,11 +361,16 @@ pub(crate) fn split_audio_chunks(samples: Vec<f32>, max_chunk_samples: usize) ->
     if samples.len() <= max_chunk_samples {
         return vec![samples];
     }
-    samples.chunks(max_chunk_samples).map(|c| c.to_vec()).collect()
+    samples
+        .chunks(max_chunk_samples)
+        .map(|c| c.to_vec())
+        .collect()
 }
 
 pub(crate) fn compression_ratio(text: &str) -> f64 {
-    if text.len() < 10 { return 0.0; }
+    if text.len() < 10 {
+        return 0.0;
+    }
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
     enc.write_all(text.as_bytes()).ok();
     let compressed = enc.finish().unwrap_or_default();

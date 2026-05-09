@@ -54,17 +54,28 @@ fn do_transcribe_streaming(
     let (samples, duration) = load_wav(wav_path)?;
 
     if config.max_audio_duration_s > 0.0 && duration > config.max_audio_duration_s {
-        return Err(TranscribeError::TooLong(duration, config.max_audio_duration_s));
+        return Err(TranscribeError::TooLong(
+            duration,
+            config.max_audio_duration_s,
+        ));
     }
 
-    let use_vad = vad_override
-        .unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
+    let use_vad =
+        vad_override.unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
 
     let max_chunk_samples = config.max_chunk_s * 16000;
     let (audio_chunks, speech_ms) = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
-            let mut vad = vad_mutex.lock().map_err(|_| TranscribeError::NoRecognizer)?;
-            let vad_result = apply_vad(&mut vad, &samples, 16000, config.vad_speech_pad_s, config.vad_max_chunk_s);
+            let mut vad = vad_mutex
+                .lock()
+                .map_err(|_| TranscribeError::NoRecognizer)?;
+            let vad_result = apply_vad(
+                &mut vad,
+                &samples,
+                16000,
+                config.vad_speech_pad_s,
+                config.vad_max_chunk_s,
+            );
             (vad_result.chunks, vad_result.speech_ms)
         } else {
             (split_audio_chunks(samples, max_chunk_samples), 0.0)
@@ -85,7 +96,13 @@ fn do_transcribe_streaming(
     let text = sanitize_utf8(joined.trim());
     let text = maybe_punctuate(models, &text, language, None);
 
-    Ok(TranscribeResult { text, chunks: Vec::new(), duration_ms: 0.0, speech_ms, words: Vec::new() })
+    Ok(TranscribeResult {
+        text,
+        chunks: Vec::new(),
+        duration_ms: 0.0,
+        speech_ms,
+        words: Vec::new(),
+    })
 }
 
 fn transcribe_ru_streaming(
@@ -95,16 +112,23 @@ fn transcribe_ru_streaming(
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
     threshold: f64,
 ) -> Result<Vec<String>, TranscribeError> {
-    let pool = models.ru.as_ref()
+    let pool = models
+        .ru
+        .as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
-    let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
+    let mut rec = pool.acquire().map_err(|e| {
+        tracing::warn!("RU pool acquire failed (streaming): {e}");
+        TranscribeError::NoRecognizer
+    })?;
     let mut texts = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let result = rec.transcribe(16000, chunk);
         let text = result.text.trim().to_string();
         if !text.is_empty() && compression_ratio(&text) <= threshold {
             let _ = tx.blocking_send(StreamEvent {
-                chunk_index: i, total_chunks: total, text: text.clone(),
+                chunk_index: i,
+                total_chunks: total,
+                text: text.clone(),
             });
             texts.push(text);
         }
@@ -120,16 +144,23 @@ fn transcribe_en_streaming(
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
     threshold: f64,
 ) -> Result<Vec<String>, TranscribeError> {
-    let pool = models.en.as_ref()
+    let pool = models
+        .en
+        .as_ref()
         .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
-    let mut rec = pool.acquire().ok_or(TranscribeError::NoRecognizer)?;
+    let mut rec = pool.acquire().map_err(|e| {
+        tracing::warn!("EN pool acquire failed (streaming): {e}");
+        TranscribeError::NoRecognizer
+    })?;
     let mut texts = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let result = rec.transcribe(16000, chunk);
         let text = result.text.trim().to_string();
         if !text.is_empty() && compression_ratio(&text) <= threshold {
             let _ = tx.blocking_send(StreamEvent {
-                chunk_index: i, total_chunks: total, text: text.clone(),
+                chunk_index: i,
+                total_chunks: total,
+                text: text.clone(),
             });
             texts.push(text);
         }

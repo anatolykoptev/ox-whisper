@@ -46,6 +46,8 @@ pub struct Config {
     pub diarize_embedding_model: String,
     /// Prometheus metrics port (OXWHISPER_PROM_PORT, default: 9092)
     pub prom_port: u16,
+    /// Idle eviction threshold in seconds (OX_WHISPER_IDLE_EVICT_SECS, default: 0 = disabled)
+    pub idle_evict_secs: u64,
 }
 
 impl Config {
@@ -124,6 +126,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(9092),
+            idle_evict_secs: env::var("OX_WHISPER_IDLE_EVICT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 }

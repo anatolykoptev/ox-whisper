@@ -1,5 +1,4 @@
 /// Unified recognizer enum wrapping different sherpa-onnx backends for RU.
-
 use sherpa_rs::OfflineRecognizerResult;
 use sherpa_rs::nemo_ctc::NemoCtcRecognizer;
 use sherpa_rs::transducer::TransducerRecognizer;
@@ -20,10 +19,16 @@ impl RuRecognizer {
         }
     }
 
-    pub fn transcribe_batch(&mut self, sample_rate: u32, chunks: &[&[f32]]) -> Vec<OfflineRecognizerResult> {
+    pub fn transcribe_batch(
+        &mut self,
+        sample_rate: u32,
+        chunks: &[&[f32]],
+    ) -> Vec<OfflineRecognizerResult> {
         match self {
             Self::NemoCtc(r) => r.transcribe_batch(sample_rate, chunks),
-            Self::NemoTransducer(r) | Self::Transducer(r) => r.transcribe_batch(sample_rate, chunks),
+            Self::NemoTransducer(r) | Self::Transducer(r) => {
+                r.transcribe_batch(sample_rate, chunks)
+            }
         }
     }
 

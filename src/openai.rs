@@ -1,5 +1,4 @@
 /// OpenAI-compatible API response types for /v1/audio/transcriptions.
-
 use crate::words::WordTimestamp;
 
 const WORDS_PER_SEGMENT: usize = 8;
@@ -97,8 +96,7 @@ mod tests {
 
     #[test]
     fn deserialize_verbose_json() {
-        let fmt: ResponseFormat =
-            serde_json::from_str(r#""verbose_json""#).unwrap();
+        let fmt: ResponseFormat = serde_json::from_str(r#""verbose_json""#).unwrap();
         assert_eq!(fmt, ResponseFormat::VerboseJson);
     }
 

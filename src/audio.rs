@@ -113,7 +113,11 @@ mod tests {
 
     #[test]
     fn test_pcm_to_f32_mono() {
-        let header = WavHeader { channels: 1, sample_rate: 16000, bits_per_sample: 16 };
+        let header = WavHeader {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+        };
         let mut data = make_wav_header(1, 16000, 16);
         data.extend_from_slice(&0i16.to_le_bytes());
         data.extend_from_slice(&16384i16.to_le_bytes());
@@ -127,7 +131,11 @@ mod tests {
 
     #[test]
     fn test_pcm_to_f32_stereo() {
-        let header = WavHeader { channels: 2, sample_rate: 16000, bits_per_sample: 16 };
+        let header = WavHeader {
+            channels: 2,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+        };
         let mut data = make_wav_header(2, 16000, 16);
         // left=16384, right=0 => avg=8192 => 8192/32768 = 0.25
         data.extend_from_slice(&16384i16.to_le_bytes());
@@ -139,7 +147,11 @@ mod tests {
 
     #[test]
     fn test_pcm_to_f32_unsupported_8bit() {
-        let header = WavHeader { channels: 1, sample_rate: 16000, bits_per_sample: 8 };
+        let header = WavHeader {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 8,
+        };
         let data = make_wav_header(1, 16000, 8);
         let err = pcm_to_f32(&data, &header).unwrap_err();
         assert!(err.to_string().contains("8-bit"));
@@ -147,7 +159,11 @@ mod tests {
 
     #[test]
     fn test_pcm_to_f32_unsupported_3ch() {
-        let header = WavHeader { channels: 3, sample_rate: 16000, bits_per_sample: 16 };
+        let header = WavHeader {
+            channels: 3,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+        };
         let data = make_wav_header(3, 16000, 16);
         let err = pcm_to_f32(&data, &header).unwrap_err();
         assert!(err.to_string().contains("3-channel"));

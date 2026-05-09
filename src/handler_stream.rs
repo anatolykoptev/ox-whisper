@@ -47,7 +47,9 @@ pub async fn transcribe_stream(
                 "total": evt.total_chunks,
                 "text": evt.text,
             });
-            let _ = tx_fwd.send(Ok(Event::default().data(data.to_string()))).await;
+            let _ = tx_fwd
+                .send(Ok(Event::default().data(data.to_string())))
+                .await;
         }
     });
 
@@ -55,11 +57,17 @@ pub async fn transcribe_stream(
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
             let r = streaming::transcribe_streaming(
-                &state.models, &state.config, &p, &language, vad, chunk_tx,
+                &state.models,
+                &state.config,
+                &p,
+                &language,
+                vad,
+                chunk_tx,
             );
             let _ = std::fs::remove_file(&path);
             r
-        }).await;
+        })
+        .await;
 
         let _ = forwarder.await;
 

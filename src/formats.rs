@@ -1,5 +1,4 @@
 /// Subtitle format generators: SRT and WebVTT from word timestamps.
-
 use crate::words::WordTimestamp;
 
 const DEFAULT_MAX_WORDS: usize = 8;
@@ -28,11 +27,12 @@ pub(crate) fn format_vtt_time(seconds: f32) -> String {
 
 /// Group words into subtitle segments of at most `max_words` words each.
 /// Returns (start, end, text) tuples.
-pub(crate) fn group_words(
-    words: &[WordTimestamp],
-    max_words: usize,
-) -> Vec<(f32, f32, String)> {
-    let limit = if max_words == 0 { DEFAULT_MAX_WORDS } else { max_words };
+pub(crate) fn group_words(words: &[WordTimestamp], max_words: usize) -> Vec<(f32, f32, String)> {
+    let limit = if max_words == 0 {
+        DEFAULT_MAX_WORDS
+    } else {
+        max_words
+    };
     let mut groups: Vec<(f32, f32, String)> = Vec::new();
 
     for chunk in words.chunks(limit) {
@@ -94,7 +94,13 @@ mod tests {
     use super::*;
 
     fn make_word(word: &str, start: f32, end: f32) -> WordTimestamp {
-        WordTimestamp { word: word.to_string(), start, end, confidence: None, speaker: None }
+        WordTimestamp {
+            word: word.to_string(),
+            start,
+            end,
+            confidence: None,
+            speaker: None,
+        }
     }
 
     #[test]
@@ -145,10 +151,7 @@ mod tests {
 
     #[test]
     fn test_to_srt() {
-        let words = vec![
-            make_word("Hello", 0.0, 0.5),
-            make_word("world", 0.6, 1.0),
-        ];
+        let words = vec![make_word("Hello", 0.0, 0.5), make_word("world", 0.6, 1.0)];
         let srt = to_srt(&words);
         assert!(srt.starts_with("1\n"));
         assert!(srt.contains("00:00:00,000 --> 00:00:01,000"));
@@ -157,10 +160,7 @@ mod tests {
 
     #[test]
     fn test_to_vtt() {
-        let words = vec![
-            make_word("Hello", 0.0, 0.5),
-            make_word("world", 0.6, 1.0),
-        ];
+        let words = vec![make_word("Hello", 0.0, 0.5), make_word("world", 0.6, 1.0)];
         let vtt = to_vtt(&words);
         assert!(vtt.starts_with("WEBVTT\n\n"));
         assert!(vtt.contains("00:00:00.000 --> 00:00:01.000"));

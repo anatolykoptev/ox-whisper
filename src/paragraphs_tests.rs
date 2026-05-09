@@ -48,21 +48,14 @@ fn one_paragraph_break() {
 
 #[test]
 fn multiple_paragraph_breaks() {
-    let words = vec![
-        w("one", 0.0, 0.3),
-        w("two", 2.0, 2.3),
-        w("three", 4.0, 4.3),
-    ];
+    let words = vec![w("one", 0.0, 0.3), w("two", 2.0, 2.3), w("three", 4.0, 4.3)];
     let result = split_paragraphs("one two three", &words, 1.5);
     assert_eq!(result, "one\n\ntwo\n\nthree");
 }
 
 #[test]
 fn threshold_exact_boundary() {
-    let words = vec![
-        w("hello", 0.0, 0.5),
-        w("world", 2.0, 2.5),
-    ];
+    let words = vec![w("hello", 0.0, 0.5), w("world", 2.0, 2.5)];
     // gap = 2.0 - 0.5 = 1.5, exactly at threshold — should trigger break
     let result = split_paragraphs("hello world", &words, 1.5);
     assert_eq!(result, "hello\n\nworld");
@@ -70,10 +63,7 @@ fn threshold_exact_boundary() {
 
 #[test]
 fn threshold_just_below() {
-    let words = vec![
-        w("hello", 0.0, 0.5),
-        w("world", 1.99, 2.5),
-    ];
+    let words = vec![w("hello", 0.0, 0.5), w("world", 1.99, 2.5)];
     // gap = 1.49, just below threshold — no break
     let result = split_paragraphs("hello world", &words, 1.5);
     assert_eq!(result, "hello world");

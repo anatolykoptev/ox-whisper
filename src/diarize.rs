@@ -1,5 +1,4 @@
 /// Speaker diarization wrapper around sherpa-onnx vendor code.
-
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -14,9 +13,7 @@ pub struct DiarizeEngine {
 impl DiarizeEngine {
     /// Load diarization models. Returns None if model files don't exist.
     pub fn load(segmentation_model: &str, embedding_model: &str) -> Option<Self> {
-        if !Path::new(segmentation_model).exists()
-            || !Path::new(embedding_model).exists()
-        {
+        if !Path::new(segmentation_model).exists() || !Path::new(embedding_model).exists() {
             tracing::warn!(
                 "Diarization models not found (seg={}, emb={}), skipping",
                 segmentation_model,

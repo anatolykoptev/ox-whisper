@@ -53,9 +53,8 @@ pub fn extract_words_with_confidence(
             continue;
         }
 
-        let starts_new_word = token.starts_with('▁')
-            || token.starts_with(' ')
-            || current_word.is_empty();
+        let starts_new_word =
+            token.starts_with('▁') || token.starts_with(' ') || current_word.is_empty();
 
         if starts_new_word && !current_word.is_empty() {
             let w = current_word.trim().to_string();
@@ -99,7 +98,9 @@ pub fn extract_words_with_confidence(
 /// Estimate word timestamps proportionally from text when the model
 /// doesn't provide per-token timestamps (e.g. Moonshine v2).
 pub fn estimate_words_from_text(
-    text: &str, audio_duration_s: f32, offset: f32,
+    text: &str,
+    audio_duration_s: f32,
+    offset: f32,
 ) -> Vec<WordTimestamp> {
     let text = text.trim();
     if text.is_empty() || audio_duration_s <= 0.0 {

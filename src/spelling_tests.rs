@@ -1,7 +1,13 @@
 use super::*;
 
 fn word(w: &str) -> WordTimestamp {
-    WordTimestamp { word: w.to_string(), start: 0.0, end: 0.0, confidence: None, speaker: None }
+    WordTimestamp {
+        word: w.to_string(),
+        start: 0.0,
+        end: 0.0,
+        confidence: None,
+        speaker: None,
+    }
 }
 
 // --- spelling rules tests ---
@@ -13,7 +19,10 @@ fn no_rules_returns_unchanged() {
 
 #[test]
 fn single_replacement() {
-    let rules = vec![SpellingRule { from: vec!["докер".into()], to: "Docker".into() }];
+    let rules = vec![SpellingRule {
+        from: vec!["докер".into()],
+        to: "Docker".into(),
+    }];
     assert_eq!(apply_spelling("запустим докер", &rules), "запустим Docker");
 }
 
@@ -28,20 +37,32 @@ fn multiple_from_variants() {
 
 #[test]
 fn case_insensitive() {
-    let rules = vec![SpellingRule { from: vec!["kubernetes".into()], to: "Kubernetes".into() }];
-    assert_eq!(apply_spelling("deploy to kubernetes", &rules), "deploy to Kubernetes");
+    let rules = vec![SpellingRule {
+        from: vec!["kubernetes".into()],
+        to: "Kubernetes".into(),
+    }];
+    assert_eq!(
+        apply_spelling("deploy to kubernetes", &rules),
+        "deploy to Kubernetes"
+    );
 }
 
 #[test]
 fn word_boundary_respected() {
-    let rules = vec![SpellingRule { from: vec!["к".into()], to: "K".into() }];
+    let rules = vec![SpellingRule {
+        from: vec!["к".into()],
+        to: "K".into(),
+    }];
     assert_eq!(apply_spelling("к нам", &rules), "K нам");
     assert_eq!(apply_spelling("как дела", &rules), "как дела");
 }
 
 #[test]
 fn apply_to_word_timestamps() {
-    let rules = vec![SpellingRule { from: vec!["докер".into()], to: "Docker".into() }];
+    let rules = vec![SpellingRule {
+        from: vec!["докер".into()],
+        to: "Docker".into(),
+    }];
     let mut words = vec![word("запустим"), word("докер")];
     apply_spelling_to_words(&mut words, &rules);
     assert_eq!(words[0].word, "запустим");
@@ -50,14 +71,20 @@ fn apply_to_word_timestamps() {
 
 #[test]
 fn spelling_preserves_trailing_punctuation() {
-    let rules = vec![SpellingRule { from: vec!["world".into()], to: "WORLD".into() }];
+    let rules = vec![SpellingRule {
+        from: vec!["world".into()],
+        to: "WORLD".into(),
+    }];
     assert_eq!(apply_spelling("Hello world!", &rules), "Hello WORLD!");
     assert_eq!(apply_spelling("Hello world...", &rules), "Hello WORLD...");
 }
 
 #[test]
 fn spelling_words_preserves_trailing_punctuation() {
-    let rules = vec![SpellingRule { from: vec!["world".into()], to: "WORLD".into() }];
+    let rules = vec![SpellingRule {
+        from: vec!["world".into()],
+        to: "WORLD".into(),
+    }];
     let mut words = vec![word("Hello"), word("world!")];
     apply_spelling_to_words(&mut words, &rules);
     assert_eq!(words[0].word, "Hello");
@@ -122,10 +149,7 @@ fn keyword_preserves_punctuation() {
 
 #[test]
 fn keyword_no_keywords() {
-    assert_eq!(
-        apply_keyword_boost("hello world", &[], 0.8),
-        "hello world"
-    );
+    assert_eq!(apply_keyword_boost("hello world", &[], 0.8), "hello world");
 }
 
 #[test]

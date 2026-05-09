@@ -1,5 +1,4 @@
 /// Multipart upload parsing for the OpenAI-compatible API.
-
 use std::path::Path;
 
 use axum::extract::Multipart;
@@ -46,7 +45,9 @@ pub async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUplo
                 let ext = field
                     .file_name()
                     .and_then(|n| {
-                        Path::new(n).extension().map(|e| e.to_string_lossy().to_string())
+                        Path::new(n)
+                            .extension()
+                            .map(|e| e.to_string_lossy().to_string())
                     })
                     .unwrap_or_else(|| "wav".to_string());
                 let tmp = format!("/tmp/{}.{}", uuid::Uuid::new_v4(), ext);
@@ -62,11 +63,14 @@ pub async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUplo
             }
             "timestamp_granularities[]" => {
                 let val = field.text().await.unwrap_or_default();
-                if val == "word" { want_words = true; }
+                if val == "word" {
+                    want_words = true;
+                }
             }
             "custom_spelling" => {
                 let val = field.text().await.unwrap_or_default();
-                if let Ok(rules) = serde_json::from_str::<Vec<crate::spelling::SpellingRule>>(&val) {
+                if let Ok(rules) = serde_json::from_str::<Vec<crate::spelling::SpellingRule>>(&val)
+                {
                     custom_spelling = rules;
                 }
             }
@@ -114,7 +118,9 @@ pub async fn parse_openai_upload(multipart: &mut Multipart) -> Result<OpenAIUplo
                 }
             }
             // model, temperature, prompt — accepted but ignored
-            _ => { let _ = field.bytes().await; }
+            _ => {
+                let _ = field.bytes().await;
+            }
         }
     }
 

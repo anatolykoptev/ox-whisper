@@ -62,8 +62,14 @@ fn assign_speakers_boundary() {
 #[test]
 fn words_to_utterances_single_speaker() {
     let words = vec![
-        WordTimestamp { speaker: Some(0), ..w("hello", 0.0, 0.3) },
-        WordTimestamp { speaker: Some(0), ..w("world", 0.4, 0.7) },
+        WordTimestamp {
+            speaker: Some(0),
+            ..w("hello", 0.0, 0.3)
+        },
+        WordTimestamp {
+            speaker: Some(0),
+            ..w("world", 0.4, 0.7)
+        },
     ];
     let utts = words_to_utterances(&words);
     assert_eq!(utts.len(), 1);
@@ -74,9 +80,18 @@ fn words_to_utterances_single_speaker() {
 #[test]
 fn words_to_utterances_alternating() {
     let words = vec![
-        WordTimestamp { speaker: Some(0), ..w("hi", 0.0, 0.2) },
-        WordTimestamp { speaker: Some(1), ..w("hey", 0.5, 0.8) },
-        WordTimestamp { speaker: Some(0), ..w("bye", 1.0, 1.3) },
+        WordTimestamp {
+            speaker: Some(0),
+            ..w("hi", 0.0, 0.2)
+        },
+        WordTimestamp {
+            speaker: Some(1),
+            ..w("hey", 0.5, 0.8)
+        },
+        WordTimestamp {
+            speaker: Some(0),
+            ..w("bye", 1.0, 1.3)
+        },
     ];
     let utts = words_to_utterances(&words);
     assert_eq!(utts.len(), 3);

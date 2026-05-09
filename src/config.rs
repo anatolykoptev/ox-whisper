@@ -58,16 +58,14 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8092),
-            models_dir: env::var("MOONSHINE_MODELS_DIR")
-                .unwrap_or_else(|_| "/models".to_string()),
+            models_dir: env::var("MOONSHINE_MODELS_DIR").unwrap_or_else(|_| "/models".to_string()),
             ru_models_dir: env::var("ZIPFORMER_RU_DIR")
                 .unwrap_or_else(|_| "/ru-models".to_string()),
             vad_model: env::var("SILERO_VAD_MODEL")
                 .unwrap_or_else(|_| "/vad/silero_vad.onnx".to_string()),
             punct_model: env::var("PUNCT_MODEL")
                 .unwrap_or_else(|_| "/punct/model.int8.onnx".to_string()),
-            punct_vocab: env::var("PUNCT_VOCAB")
-                .unwrap_or_else(|_| "/punct/bpe.vocab".to_string()),
+            punct_vocab: env::var("PUNCT_VOCAB").unwrap_or_else(|_| "/punct/bpe.vocab".to_string()),
             num_threads: env::var("MOONSHINE_THREADS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -116,8 +114,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(50),
-            provider: env::var("ONNX_PROVIDER")
-                .unwrap_or_else(|_| "cpu".to_string()),
+            provider: env::var("ONNX_PROVIDER").unwrap_or_else(|_| "cpu".to_string()),
             diarize_segmentation_model: env::var("DIARIZE_SEGMENTATION_MODEL")
                 .unwrap_or_else(|_| "/diarize/segmentation.onnx".to_string()),
             diarize_embedding_model: env::var("DIARIZE_EMBEDDING_MODEL")

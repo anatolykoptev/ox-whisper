@@ -39,7 +39,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
     let _conn = WsConnGuard { start };
 
     let request_id = uuid::Uuid::new_v4().to_string();
-    let model = if params.language == "ru" { "gigaam" } else { "moonshine-v2" };
+    let model = if params.language == "ru" {
+        "gigaam"
+    } else {
+        "moonshine-v2"
+    };
 
     // Send metadata
     let meta = ServerMessage::Metadata {
@@ -72,11 +76,16 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
                     let (vad_msgs, speech_final) =
                         session.run_vad_check(&state.models, &state.config);
                     for m in vad_msgs {
-                        if send_msg(&mut socket, &m).await.is_err() { return; }
+                        if send_msg(&mut socket, &m).await.is_err() {
+                            return;
+                        }
                     }
                     if speech_final {
-                        if let Some(msg) = do_transcribe(&state, &mut session, &params, false).await {
-                            if send_msg(&mut socket, &msg).await.is_err() { return; }
+                        if let Some(msg) = do_transcribe(&state, &mut session, &params, false).await
+                        {
+                            if send_msg(&mut socket, &msg).await.is_err() {
+                                return;
+                            }
                         }
                         continue;
                     }
@@ -85,31 +94,33 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
                 // Interim results
                 if params.interim_results && session.should_emit_interim(INTERIM_INTERVAL_S) {
                     if let Some(msg) = do_transcribe_interim(&state, &mut session, &params).await {
-                        if send_msg(&mut socket, &msg).await.is_err() { return; }
+                        if send_msg(&mut socket, &msg).await.is_err() {
+                            return;
+                        }
                     }
                     session.mark_interim();
                 }
             }
-            Message::Text(text) => {
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(ClientMessage::Finalize) => {
-                        if let Some(msg) = do_transcribe(&state, &mut session, &params, true).await {
-                            if send_msg(&mut socket, &msg).await.is_err() { return; }
+            Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                Ok(ClientMessage::Finalize) => {
+                    if let Some(msg) = do_transcribe(&state, &mut session, &params, true).await {
+                        if send_msg(&mut socket, &msg).await.is_err() {
+                            return;
                         }
-                    }
-                    Ok(ClientMessage::CloseStream) => {
-                        if let Some(msg) = do_transcribe(&state, &mut session, &params, true).await {
-                            let _ = send_msg(&mut socket, &msg).await;
-                        }
-                        let _ = send_msg(&mut socket, &ServerMessage::CloseStream).await;
-                        break;
-                    }
-                    Ok(ClientMessage::KeepAlive) => {}
-                    Err(e) => {
-                        tracing::debug!("WS unknown text message: {}", e);
                     }
                 }
-            }
+                Ok(ClientMessage::CloseStream) => {
+                    if let Some(msg) = do_transcribe(&state, &mut session, &params, true).await {
+                        let _ = send_msg(&mut socket, &msg).await;
+                    }
+                    let _ = send_msg(&mut socket, &ServerMessage::CloseStream).await;
+                    break;
+                }
+                Ok(ClientMessage::KeepAlive) => {}
+                Err(e) => {
+                    tracing::debug!("WS unknown text message: {}", e);
+                }
+            },
             Message::Close(_) => break,
             _ => {}
         }
@@ -118,27 +129,41 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
 
 /// Transcribe the buffer and return a final Results message.
 async fn do_transcribe(
-    state: &Arc<AppState>, session: &mut WsSession, params: &WsParams, from_finalize: bool,
+    state: &Arc<AppState>,
+    session: &mut WsSession,
+    params: &WsParams,
+    from_finalize: bool,
 ) -> Option<ServerMessage> {
     let samples = session.take_buffer();
-    if samples.is_empty() { return None; }
-    let (text, words) = transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
+    if samples.is_empty() {
+        return None;
+    }
+    let (text, words) =
+        transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
     Some(session.store_final(text, words, from_finalize))
 }
 
 /// Transcribe a copy of the buffer for interim results (non-destructive peek).
 async fn do_transcribe_interim(
-    state: &Arc<AppState>, session: &mut WsSession, params: &WsParams,
+    state: &Arc<AppState>,
+    session: &mut WsSession,
+    params: &WsParams,
 ) -> Option<ServerMessage> {
     let samples = session.peek_buffer();
-    if samples.is_empty() { return None; }
-    let (text, words) = transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
+    if samples.is_empty() {
+        return None;
+    }
+    let (text, words) =
+        transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
     Some(session.interim_result(text, words))
 }
 
 /// Run transcription on samples via spawn_blocking.
 async fn transcribe_buffer(
-    state: &Arc<AppState>, samples: Vec<f32>, language: &str, punctuate: bool,
+    state: &Arc<AppState>,
+    samples: Vec<f32>,
+    language: &str,
+    punctuate: bool,
 ) -> Option<(String, Vec<WordTimestamp>)> {
     let models = state.clone();
     let lang = language.to_string();
@@ -163,10 +188,13 @@ async fn transcribe_buffer(
 }
 
 fn transcribe_with_pool_en(
-    models: &crate::models::Models, samples: &[f32], _language: &str, threshold: f64,
+    models: &crate::models::Models,
+    samples: &[f32],
+    _language: &str,
+    threshold: f64,
 ) -> Option<(String, Vec<WordTimestamp>)> {
     let pool = models.en.as_ref()?;
-    let mut rec = pool.acquire()?;
+    let mut rec = pool.acquire().ok()?;
     metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "en").increment(1.0);
     struct EnBusyGuard;
     impl Drop for EnBusyGuard {
@@ -177,9 +205,17 @@ fn transcribe_with_pool_en(
     let _busy = EnBusyGuard;
     let result = rec.transcribe(16000, samples);
     let text = result.text.trim().to_string();
-    if text.is_empty() || compression_ratio(&text) > threshold { return None; }
+    if text.is_empty() || compression_ratio(&text) > threshold {
+        return None;
+    }
     let mut words = Vec::new();
-    extract_words_with_confidence(&result.tokens, &result.timestamps, &result.log_probs, 0.0, &mut words);
+    extract_words_with_confidence(
+        &result.tokens,
+        &result.timestamps,
+        &result.log_probs,
+        0.0,
+        &mut words,
+    );
     if words.is_empty() && !text.is_empty() {
         words = estimate_words_from_text(&text, samples.len() as f32 / 16000.0, 0.0);
     }
@@ -187,10 +223,12 @@ fn transcribe_with_pool_en(
 }
 
 fn transcribe_with_pool_ru(
-    models: &crate::models::Models, samples: &[f32], threshold: f64,
+    models: &crate::models::Models,
+    samples: &[f32],
+    threshold: f64,
 ) -> Option<(String, Vec<WordTimestamp>)> {
     let pool = models.ru.as_ref()?;
-    let mut rec = pool.acquire()?;
+    let mut rec = pool.acquire().ok()?;
     metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "ru").increment(1.0);
     struct RuBusyGuard;
     impl Drop for RuBusyGuard {
@@ -201,9 +239,17 @@ fn transcribe_with_pool_ru(
     let _busy = RuBusyGuard;
     let result = rec.transcribe(16000, samples);
     let text = result.text.trim().to_string();
-    if text.is_empty() || compression_ratio(&text) > threshold { return None; }
+    if text.is_empty() || compression_ratio(&text) > threshold {
+        return None;
+    }
     let mut words = Vec::new();
-    extract_words_with_confidence(&result.tokens, &result.timestamps, &result.log_probs, 0.0, &mut words);
+    extract_words_with_confidence(
+        &result.tokens,
+        &result.timestamps,
+        &result.log_probs,
+        0.0,
+        &mut words,
+    );
     if words.is_empty() && !text.is_empty() {
         words = estimate_words_from_text(&text, samples.len() as f32 / 16000.0, 0.0);
     }
@@ -212,5 +258,8 @@ fn transcribe_with_pool_ru(
 
 async fn send_msg(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), ()> {
     let json = serde_json::to_string(msg).map_err(|_| ())?;
-    socket.send(Message::Text(json.into())).await.map_err(|_| ())
+    socket
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|_| ())
 }

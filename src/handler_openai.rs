@@ -1,5 +1,4 @@
 /// OpenAI-compatible /v1/audio/transcriptions endpoint.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -51,8 +50,13 @@ pub async fn transcriptions(
     let state_clone = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         transcribe::transcribe(
-            &state_clone.models, &state_clone.config, &path, &language,
-            None, None, 0,
+            &state_clone.models,
+            &state_clone.config,
+            &path,
+            &language,
+            None,
+            None,
+            0,
         )
     })
     .await
@@ -69,9 +73,23 @@ pub async fn transcriptions(
             } else {
                 vec![]
             };
-            (format_response(format, &r, &detected_lang, want_words, lang_confidence, upload.extra, utterances), true)
+            (
+                format_response(
+                    format,
+                    &r,
+                    &detected_lang,
+                    want_words,
+                    lang_confidence,
+                    upload.extra,
+                    utterances,
+                ),
+                true,
+            )
         }
-        Err(e) => (error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()), false),
+        Err(e) => (
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            false,
+        ),
     };
 
     let status = if ok { "ok" } else { "err" };
@@ -92,7 +110,9 @@ async fn run_diarization(
 ) {
     if let Ok((wav_path, tmp)) = audio::ensure_wav(file_path) {
         if let Ok((samples, _)) = audio::load_wav(&wav_path) {
-            if tmp { let _ = std::fs::remove_file(&wav_path); }
+            if tmp {
+                let _ = std::fs::remove_file(&wav_path);
+            }
             let diarize_state = state.clone();
             let mut words = std::mem::take(&mut result.words);
             let diarized = tokio::task::spawn_blocking(move || {
@@ -100,7 +120,9 @@ async fn run_diarization(
                     engine.assign_speakers(&samples, &mut words, num_speakers);
                 }
                 words
-            }).await.unwrap_or_default();
+            })
+            .await
+            .unwrap_or_default();
             result.words = diarized;
         }
     }
@@ -120,12 +142,19 @@ fn apply_post_processing(
     }
     if upload.paragraphs {
         r.text = crate::paragraphs::split_paragraphs(
-            &r.text, &r.words, crate::paragraphs::default_threshold(),
+            &r.text,
+            &r.words,
+            crate::paragraphs::default_threshold(),
         );
     }
     if !upload.keywords.is_empty() {
-        r.text = crate::spelling::apply_keyword_boost(&r.text, &upload.keywords, upload.keywords_boost);
-        crate::spelling::apply_keyword_boost_to_words(&mut r.words, &upload.keywords, upload.keywords_boost);
+        r.text =
+            crate::spelling::apply_keyword_boost(&r.text, &upload.keywords, upload.keywords_boost);
+        crate::spelling::apply_keyword_boost_to_words(
+            &mut r.words,
+            &upload.keywords,
+            upload.keywords_boost,
+        );
     }
     if !upload.pii_types.is_empty() {
         let redactor = crate::pii::PiiRedactor::new();
@@ -146,6 +175,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde
     if let Some(pool) = state.models.ru.as_ref() {
         let name = pool
             .acquire()
+            .ok()
             .map(|r| r.model_name())
             .unwrap_or("ru-model");
         data.push(serde_json::json!({
@@ -162,14 +192,19 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde
 fn detect_language_from_file(state: &Arc<AppState>, path: &Path) -> DetectResult {
     let wav_result = audio::ensure_wav(path).and_then(|(wav_path, tmp)| {
         let result = audio::load_wav(&wav_path);
-        if tmp { let _ = std::fs::remove_file(&wav_path); }
+        if tmp {
+            let _ = std::fs::remove_file(&wav_path);
+        }
         result
     });
     match wav_result {
         Ok((samples, _)) => detect_language(&state.models, &samples),
         Err(e) => {
             tracing::warn!("language detection failed, defaulting to en: {e}");
-            DetectResult { language: "en".to_string(), confidence: 0.0 }
+            DetectResult {
+                language: "en".to_string(),
+                confidence: 0.0,
+            }
         }
     }
 }
@@ -185,24 +220,38 @@ fn format_response(
 ) -> Response {
     match format {
         ResponseFormat::Json => {
-            let body = JsonResponse { text: result.text.clone(), extra };
+            let body = JsonResponse {
+                text: result.text.clone(),
+                extra,
+            };
             axum::Json(body).into_response()
         }
         ResponseFormat::VerboseJson => {
             let segments = words_to_segments(&result.words);
-            let words = if want_words { words_to_openai(&result.words) } else { vec![] };
+            let words = if want_words {
+                words_to_openai(&result.words)
+            } else {
+                vec![]
+            };
             let lang = if language.is_empty() { "en" } else { language };
             let body = VerboseJsonResponse {
                 text: result.text.clone(),
                 language: lang.to_string(),
                 duration: result.duration_ms / 1000.0,
-                segments, words, language_confidence, utterances, extra,
+                segments,
+                words,
+                language_confidence,
+                utterances,
+                extra,
             };
             axum::Json(body).into_response()
         }
-        ResponseFormat::Text => {
-            (StatusCode::OK, [("content-type", "text/plain")], result.text.clone()).into_response()
-        }
+        ResponseFormat::Text => (
+            StatusCode::OK,
+            [("content-type", "text/plain")],
+            result.text.clone(),
+        )
+            .into_response(),
         ResponseFormat::Srt => {
             let body = formats::to_srt(&result.words);
             (StatusCode::OK, [("content-type", "text/plain")], body).into_response()

@@ -2,7 +2,6 @@
 ///
 /// Runs a short audio clip through available models and picks the language
 /// whose model produces more characters (longer meaningful output).
-
 use crate::models::Models;
 
 /// Maximum samples for detection (~3 seconds at 16kHz).
@@ -29,7 +28,11 @@ pub(crate) fn detect_language(models: &Models, samples: &[f32]) -> DetectResult 
     let en_len = try_transcribe_en(models, clip);
     let ru_len = try_transcribe_ru(models, clip);
 
-    tracing::debug!("language detection: en={} chars, ru={} chars", en_len, ru_len);
+    tracing::debug!(
+        "language detection: en={} chars, ru={} chars",
+        en_len,
+        ru_len
+    );
 
     let total = en_len + ru_len;
     let (language, winner_len) = if ru_len > en_len {
@@ -55,8 +58,8 @@ fn try_transcribe_en(models: &Models, samples: &[f32]) -> usize {
         None => return 0,
     };
     let mut rec = match pool.acquire() {
-        Some(r) => r,
-        None => return 0,
+        Ok(r) => r,
+        Err(_) => return 0,
     };
     let result = rec.transcribe(16000, samples);
     result.text.trim().chars().count()
@@ -68,8 +71,8 @@ fn try_transcribe_ru(models: &Models, samples: &[f32]) -> usize {
         None => return 0,
     };
     let mut rec = match pool.acquire() {
-        Some(r) => r,
-        None => return 0,
+        Ok(r) => r,
+        Err(_) => return 0,
     };
     let result = rec.transcribe(16000, samples);
     result.text.trim().chars().count()

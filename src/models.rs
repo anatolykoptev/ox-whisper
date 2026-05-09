@@ -18,6 +18,16 @@ pub struct Models {
     pub vad: Option<Mutex<SileroVad>>,
     pub punct: Option<Mutex<OnlinePunctuation>>,
     pub diarize: Option<crate::diarize::DiarizeEngine>,
+    /// Eviction loop handles — aborted on drop to stop background tasks.
+    eviction_handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Models {
+    fn drop(&mut self) {
+        for handle in &self.eviction_handles {
+            handle.abort();
+        }
+    }
 }
 
 impl Models {
@@ -34,20 +44,41 @@ impl Models {
         warmup(&en, "EN");
         warmup(&ru, "RU");
 
-        let models = Self { en, ru, vad, punct, diarize };
+        let mut eviction_handles = Vec::new();
 
         // Spawn idle-eviction loop if threshold is configured.
+        // ── M1: tick = max(idle_secs / 4, 5s) to keep max latency ≤ 1.25× threshold.
         if config.idle_evict_secs > 0 {
-            let tick = std::time::Duration::from_secs(config.idle_evict_secs);
-            if let Some(ref pool) = models.en {
-                pool.spawn_eviction_loop(tick);
+            // ── Open question: warn on aggressive threshold.
+            if config.idle_evict_secs < 30 {
+                tracing::warn!(
+                    idle_evict_secs = config.idle_evict_secs,
+                    "aggressive eviction threshold may cause excessive cold-starts (recommended ≥ 30s)"
+                );
             }
-            if let Some(ref pool) = models.ru {
-                pool.spawn_eviction_loop(tick);
+            let quarter = std::time::Duration::from_secs(config.idle_evict_secs / 4);
+            let tick = quarter.max(std::time::Duration::from_secs(5));
+            tracing::info!(
+                ?tick,
+                idle_evict_secs = config.idle_evict_secs,
+                "idle eviction enabled"
+            );
+            if let Some(ref pool) = en {
+                eviction_handles.push(pool.spawn_eviction_loop(tick));
+            }
+            if let Some(ref pool) = ru {
+                eviction_handles.push(pool.spawn_eviction_loop(tick));
             }
         }
 
-        models
+        Self {
+            en,
+            ru,
+            vad,
+            punct,
+            diarize,
+            eviction_handles,
+        }
     }
 }
 
@@ -107,11 +138,12 @@ fn load_moonshine(config: &Config) -> Option<std::sync::Arc<EvictablePool<Moonsh
     let size = recognizers.len();
     // Factory for lazy reinit after eviction.
     let cfg_for_factory = moonshine_cfg.clone();
-    let factory: std::sync::Arc<dyn Fn() -> MoonshineRecognizer + Send + Sync> =
-        std::sync::Arc::new(move || {
-            MoonshineRecognizer::new(cfg_for_factory.clone())
-                .expect("MoonshineRecognizer reinit failed")
-        });
+    let factory: std::sync::Arc<
+        dyn Fn() -> Result<MoonshineRecognizer, anyhow::Error> + Send + Sync,
+    > = std::sync::Arc::new(move || {
+        MoonshineRecognizer::new(cfg_for_factory.clone())
+            .map_err(|e| anyhow::anyhow!("MoonshineRecognizer reinit failed: {e}"))
+    });
     let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory);
     metrics::gauge!(metric_names::POOL_SIZE, "lang" => "en").set(size as f64);
     Some(std::sync::Arc::new(pool))
@@ -121,7 +153,9 @@ fn load_ru(config: &Config) -> Option<std::sync::Arc<EvictablePool<RuRecognizer>
     // Try NeMo CTC (GigaAM) first — faster, better WER
     let nemo_model = format!("{}/model.int8.onnx", config.ru_models_dir);
     let nemo_tokens = format!("{}/tokens.txt", config.ru_models_dir);
-    if Path::new(&nemo_model).exists() && !Path::new(&format!("{}/encoder.int8.onnx", config.ru_models_dir)).exists() {
+    if Path::new(&nemo_model).exists()
+        && !Path::new(&format!("{}/encoder.int8.onnx", config.ru_models_dir)).exists()
+    {
         return load_nemo_ctc(config, &nemo_model, &nemo_tokens);
     }
 
@@ -134,7 +168,11 @@ fn load_ru(config: &Config) -> Option<std::sync::Arc<EvictablePool<RuRecognizer>
     load_zipformer(config, &encoder_path)
 }
 
-fn load_nemo_ctc(config: &Config, model: &str, tokens: &str) -> Option<std::sync::Arc<EvictablePool<RuRecognizer>>> {
+fn load_nemo_ctc(
+    config: &Config,
+    model: &str,
+    tokens: &str,
+) -> Option<std::sync::Arc<EvictablePool<RuRecognizer>>> {
     let nemo_cfg = NemoCtcConfig {
         model: model.to_string(),
         tokens: tokens.to_string(),
@@ -160,19 +198,21 @@ fn load_nemo_ctc(config: &Config, model: &str, tokens: &str) -> Option<std::sync
     }
     let size = recognizers.len();
     let cfg_for_factory = nemo_cfg.clone();
-    let factory: std::sync::Arc<dyn Fn() -> RuRecognizer + Send + Sync> =
+    let factory: std::sync::Arc<dyn Fn() -> Result<RuRecognizer, anyhow::Error> + Send + Sync> =
         std::sync::Arc::new(move || {
-            RuRecognizer::NemoCtc(
-                NemoCtcRecognizer::new(cfg_for_factory.clone())
-                    .expect("NemoCtcRecognizer reinit failed"),
-            )
+            NemoCtcRecognizer::new(cfg_for_factory.clone())
+                .map(RuRecognizer::NemoCtc)
+                .map_err(|e| anyhow::anyhow!("NemoCtcRecognizer reinit failed: {e}"))
         });
     let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory);
     metrics::gauge!(metric_names::POOL_SIZE, "lang" => "ru").set(size as f64);
     Some(std::sync::Arc::new(pool))
 }
 
-fn load_zipformer(config: &Config, encoder_path: &str) -> Option<std::sync::Arc<EvictablePool<RuRecognizer>>> {
+fn load_zipformer(
+    config: &Config,
+    encoder_path: &str,
+) -> Option<std::sync::Arc<EvictablePool<RuRecognizer>>> {
     let model_type = detect_transducer_type(encoder_path);
     let is_nemo = model_type == "nemo_transducer";
     let decoder_path = find_model_file(&config.ru_models_dir, "decoder");
@@ -194,8 +234,18 @@ fn load_zipformer(config: &Config, encoder_path: &str) -> Option<std::sync::Arc<
     for i in 0..config.pool_size {
         match TransducerRecognizer::new(transducer_cfg.clone()) {
             Ok(r) => {
-                let variant = if is_nemo { "NeMo GigaAM v3" } else { "Zipformer" };
-                tracing::info!("RU {} ({}) {}/{} loaded", variant, transducer_cfg.model_type, i + 1, config.pool_size);
+                let variant = if is_nemo {
+                    "NeMo GigaAM v3"
+                } else {
+                    "Zipformer"
+                };
+                tracing::info!(
+                    "RU {} ({}) {}/{} loaded",
+                    variant,
+                    transducer_cfg.model_type,
+                    i + 1,
+                    config.pool_size
+                );
                 let rec = if is_nemo {
                     RuRecognizer::NemoTransducer(r)
                 } else {
@@ -214,11 +264,17 @@ fn load_zipformer(config: &Config, encoder_path: &str) -> Option<std::sync::Arc<
     }
     let size = recognizers.len();
     let cfg_for_factory = transducer_cfg.clone();
-    let factory: std::sync::Arc<dyn Fn() -> RuRecognizer + Send + Sync> =
+    let factory: std::sync::Arc<dyn Fn() -> Result<RuRecognizer, anyhow::Error> + Send + Sync> =
         std::sync::Arc::new(move || {
-            let r = TransducerRecognizer::new(cfg_for_factory.clone())
-                .expect("TransducerRecognizer reinit failed");
-            if is_nemo { RuRecognizer::NemoTransducer(r) } else { RuRecognizer::Transducer(r) }
+            TransducerRecognizer::new(cfg_for_factory.clone())
+                .map(|r| {
+                    if is_nemo {
+                        RuRecognizer::NemoTransducer(r)
+                    } else {
+                        RuRecognizer::Transducer(r)
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!("TransducerRecognizer reinit failed: {e}"))
         });
     let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory);
     metrics::gauge!(metric_names::POOL_SIZE, "lang" => "ru").set(size as f64);
@@ -243,7 +299,9 @@ fn detect_transducer_type(encoder_path: &str) -> String {
 /// Find decoder/joiner model file, preferring .int8.onnx over .onnx.
 fn find_model_file(dir: &str, name: &str) -> String {
     let int8 = format!("{}/{}.int8.onnx", dir, name);
-    if Path::new(&int8).exists() { return int8; }
+    if Path::new(&int8).exists() {
+        return int8;
+    }
     format!("{}/{}.onnx", dir, name)
 }
 
@@ -253,20 +311,36 @@ fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {
         return None;
     }
     let cfg = SileroVadConfig {
-        model: config.vad_model.clone(), threshold: config.vad_threshold,
-        min_silence_duration: config.vad_min_silence_s, min_speech_duration: config.vad_min_speech_s,
-        window_size: 512, ..Default::default()
+        model: config.vad_model.clone(),
+        threshold: config.vad_threshold,
+        min_silence_duration: config.vad_min_silence_s,
+        min_speech_duration: config.vad_min_speech_s,
+        window_size: 512,
+        ..Default::default()
     };
-    let vad_max = if config.max_audio_duration_s > 0.0 { config.max_audio_duration_s } else { 3600.0 };
+    let vad_max = if config.max_audio_duration_s > 0.0 {
+        config.max_audio_duration_s
+    } else {
+        3600.0
+    };
     match SileroVad::new(cfg, vad_max as f32) {
-        Ok(v) => { tracing::info!("VAD loaded from {}", config.vad_model); Some(Mutex::new(v)) }
-        Err(e) => { tracing::error!("VAD load failed: {}", e); None }
+        Ok(v) => {
+            tracing::info!("VAD loaded from {}", config.vad_model);
+            Some(Mutex::new(v))
+        }
+        Err(e) => {
+            tracing::error!("VAD load failed: {}", e);
+            None
+        }
     }
 }
 
 fn load_punctuation(config: &Config) -> Option<Mutex<OnlinePunctuation>> {
     if !Path::new(&config.punct_model).exists() {
-        tracing::warn!("Punctuation model not found at {}, skipping", config.punct_model);
+        tracing::warn!(
+            "Punctuation model not found at {}, skipping",
+            config.punct_model
+        );
         return None;
     }
     let cfg = OnlinePunctuationConfig {
@@ -275,24 +349,39 @@ fn load_punctuation(config: &Config) -> Option<Mutex<OnlinePunctuation>> {
         ..Default::default()
     };
     match OnlinePunctuation::new(cfg) {
-        Ok(p) => { tracing::info!("Punctuation loaded from {}", config.punct_model); Some(Mutex::new(p)) }
-        Err(e) => { tracing::error!("Punctuation load failed: {}", e); None }
+        Ok(p) => {
+            tracing::info!("Punctuation loaded from {}", config.punct_model);
+            Some(Mutex::new(p))
+        }
+        Err(e) => {
+            tracing::error!("Punctuation load failed: {}", e);
+            None
+        }
     }
 }
 
-fn warmup<T: Warmable + Send + 'static>(pool: &Option<std::sync::Arc<EvictablePool<T>>>, label: &str) {
+fn warmup<T: Warmable + Send + 'static>(
+    pool: &Option<std::sync::Arc<EvictablePool<T>>>,
+    label: &str,
+) {
     if let Some(p) = pool
-        && let Some(mut r) = p.acquire()
+        && let Ok(mut r) = p.acquire()
     {
         r.warmup();
         tracing::info!("{} warmup complete", label);
     }
 }
 
-trait Warmable { fn warmup(&mut self); }
+trait Warmable {
+    fn warmup(&mut self);
+}
 impl Warmable for MoonshineRecognizer {
-    fn warmup(&mut self) { let _ = self.transcribe(16000, &[0.0f32; 16000]); }
+    fn warmup(&mut self) {
+        let _ = self.transcribe(16000, &[0.0f32; 16000]);
+    }
 }
 impl Warmable for RuRecognizer {
-    fn warmup(&mut self) { let _ = self.transcribe(16000, &[0.0f32; 16000]); }
+    fn warmup(&mut self) {
+        let _ = self.transcribe(16000, &[0.0f32; 16000]);
+    }
 }

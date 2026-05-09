@@ -56,6 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("invalid prom_port");
     tokio::spawn(metrics::serve(prom_handle, prom_addr));
 
+    if config.idle_evict_secs > 0 {
+        tracing::info!(
+            "Idle eviction enabled: recognizers will be evicted after {}s of inactivity",
+            config.idle_evict_secs
+        );
+    }
+
     tracing::info!("Loading models...");
     let models = Models::load(&config);
 

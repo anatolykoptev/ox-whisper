@@ -2,65 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub struct Pool<T> {
-    items: Mutex<Vec<T>>,
-}
-
-impl<T> Pool<T> {
-    pub fn new(items: Vec<T>) -> Self {
-        Self {
-            items: Mutex::new(items),
-        }
-    }
-
-    /// Acquire an item from the pool. Returns None if pool is empty.
-    pub fn acquire(&self) -> Option<PoolGuard<'_, T>> {
-        let mut items = self.items.lock().ok()?;
-        let item = items.pop()?;
-        Some(PoolGuard {
-            pool: self,
-            item: Some(item),
-        })
-    }
-
-    fn return_item(&self, item: T) {
-        if let Ok(mut items) = self.items.lock() {
-            items.push(item);
-        }
-    }
-}
-
-pub struct PoolGuard<'a, T> {
-    pool: &'a Pool<T>,
-    item: Option<T>,
-}
-
-impl<T> std::ops::Deref for PoolGuard<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        self.item.as_ref().unwrap()
-    }
-}
-
-impl<T> std::ops::DerefMut for PoolGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        self.item.as_mut().unwrap()
-    }
-}
-
-impl<T> Drop for PoolGuard<'_, T> {
-    fn drop(&mut self) {
-        if let Some(item) = self.item.take() {
-            self.pool.return_item(item);
-        }
-    }
-}
-
 // ── EvictablePool ─────────────────────────────────────────────────────────────
 
-// EvictablePool is currently used only in tests and will be wired into Models
-// once the Models refactor (feat/evictable-pool-models) lands.
-#[allow(dead_code)]
 fn unix_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -68,7 +11,6 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
-#[allow(dead_code)]
 /// A single slot in an EvictablePool.
 ///
 /// State machine:
@@ -81,7 +23,6 @@ struct EvictableSlot<T> {
     last_used: AtomicU64,
 }
 
-#[allow(dead_code)]
 /// Pool with opt-in idle eviction. Items are lazily re-created via `factory`
 /// when a slot is evicted and then acquired again.
 ///
@@ -93,10 +34,10 @@ pub struct EvictablePool<T> {
     idle_secs: u64,
 }
 
-#[allow(dead_code)]
 impl<T: Send + 'static> EvictablePool<T> {
     /// Create a pool with `size` slots pre-filled via `factory`.
     /// `idle_secs == 0` disables eviction.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(
         size: usize,
         idle_secs: u64,
@@ -107,6 +48,29 @@ impl<T: Send + 'static> EvictablePool<T> {
             .map(|_| {
                 Arc::new(EvictableSlot {
                     item: Mutex::new(Some((factory)())),
+                    busy: std::sync::atomic::AtomicBool::new(false),
+                    last_used: AtomicU64::new(now),
+                })
+            })
+            .collect();
+        Self { slots, factory, idle_secs }
+    }
+
+    /// Create a pool pre-filled with already-constructed items.
+    ///
+    /// `factory` is used only for lazy re-init after eviction.
+    /// `idle_secs == 0` disables eviction.
+    pub fn from_items(
+        items: Vec<T>,
+        idle_secs: u64,
+        factory: Arc<dyn Fn() -> T + Send + Sync>,
+    ) -> Self {
+        let now = unix_now_secs();
+        let slots = items
+            .into_iter()
+            .map(|item| {
+                Arc::new(EvictableSlot {
+                    item: Mutex::new(Some(item)),
                     busy: std::sync::atomic::AtomicBool::new(false),
                     last_used: AtomicU64::new(now),
                 })
@@ -174,6 +138,27 @@ impl<T: Send + 'static> EvictablePool<T> {
         count
     }
 
+    /// Spawn a background tokio task that calls `evict_idle` every `tick` interval.
+    ///
+    /// The returned `JoinHandle` can be aborted to stop the loop.
+    /// When `self.idle_secs == 0`, the loop still spawns but `evict_idle` is a
+    /// no-op — callers should gate on `idle_secs > 0` before calling this.
+    pub fn spawn_eviction_loop(
+        self: &std::sync::Arc<Self>,
+        tick: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let pool = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick);
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                let threshold = pool.idle_secs;
+                pool.evict_idle(threshold);
+            }
+        })
+    }
+
     /// Test helper: push all slots' last_used `secs` seconds into the past.
     #[cfg(test)]
     pub fn force_last_used_ago(&self, secs: u64) {
@@ -184,7 +169,6 @@ impl<T: Send + 'static> EvictablePool<T> {
     }
 }
 
-#[allow(dead_code)]
 /// RAII guard that returns the item to its slot on drop and refreshes `last_used`.
 pub struct EvictableGuard<T> {
     slot: Arc<EvictableSlot<T>>,
@@ -303,5 +287,66 @@ mod tests {
         pool.force_last_used_ago(5);
         let evicted = pool.evict_idle(1);
         assert_eq!(evicted, 3, "all 3 slots evicted");
+    }
+
+    // ── 6. eviction_loop_runs_and_evicts ────────────────────────────────────
+    /// Verify that `spawn_eviction_loop` actually calls `evict_idle` periodically.
+    /// Uses an Arc<EvictablePool<u32>> with idle_secs=1, forces last_used 5s into
+    /// the past, then lets the loop fire and checks that a slot is evicted.
+    #[tokio::test]
+    async fn eviction_loop_runs_and_evicts() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering2};
+        use std::sync::Arc as StdArc;
+
+        // Pool with 1 slot, idle_secs=1 so eviction is enabled.
+        let evict_counter = StdArc::new(AtomicUsize::new(0));
+        let ec = evict_counter.clone();
+        let pool = StdArc::new(EvictablePool::new(
+            1,
+            1,
+            StdArc::new(move || {
+                ec.fetch_add(1, AOrdering2::SeqCst);
+                99u32
+            }),
+        ));
+
+        // Acquire + release to mark it idle, then wind back clock.
+        {
+            let _guard = pool.acquire().expect("acquire for loop test");
+        }
+        pool.force_last_used_ago(5);
+
+        // Spawn loop with 200ms tick — fast enough for test, but won't fire
+        // spuriously in normal runs.
+        let handle = pool.spawn_eviction_loop(std::time::Duration::from_millis(200));
+
+        // Wait 500ms — loop should fire at least twice in that window.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        handle.abort();
+
+        // The slot should have been evicted (set to None).
+        let guard = pool.slots[0].item.lock().unwrap();
+        assert!(guard.is_none(), "slot should be evicted after loop ran");
+    }
+
+    // ── 7. eviction_loop_no_eviction_when_idle_secs_zero ────────────────────
+    /// When idle_secs==0, eviction is disabled; loop must not evict.
+    #[tokio::test]
+    async fn eviction_loop_no_eviction_when_idle_secs_zero() {
+        use std::sync::Arc as StdArc;
+
+        let pool = StdArc::new(make_pool(1, 0)); // idle_secs=0 → disabled
+        {
+            let _guard = pool.acquire().expect("acquire");
+        }
+        pool.force_last_used_ago(9999);
+
+        let handle = pool.spawn_eviction_loop(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        handle.abort();
+
+        // Slot should still be Some — no eviction.
+        let guard = pool.slots[0].item.lock().unwrap();
+        assert!(guard.is_some(), "idle_secs=0 → no eviction even with stale last_used");
     }
 }

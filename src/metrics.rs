@@ -14,10 +14,7 @@ pub mod names {
     pub const POOL_SIZE: &str = "oxwhisper_recognizer_pool_size";
     pub const POOL_BUSY: &str = "oxwhisper_recognizer_pool_busy";
     pub const WS_ACTIVE: &str = "oxwhisper_ws_active_connections";
-    // Used by EvictablePool; will be active in prod once Models migrate to EvictablePool.
-    #[allow(dead_code)]
     pub const POOL_EVICTIONS: &str = "ox_whisper_pool_evictions_total";
-    #[allow(dead_code)]
     pub const POOL_COLD_STARTS: &str = "ox_whisper_pool_cold_starts_total";
 }
 

@@ -5,9 +5,29 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel stale runs on push to same ref — avoids burning CPU on outdated commits.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install --no-self-update
+
+      - name: Check formatting
+        run: cargo fmt --check
+
   build:
     runs-on: ubuntu-latest
+    # `actions: write` required for `--cache-to type=gha,mode=max` (GHA cache write API).
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
 
@@ -18,4 +38,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build via Docker (aarch64)
-        run: docker buildx build --platform linux/arm64 --target builder .
+        # GHA cache — saves ~30-40 min on warm runs (QEMU aarch64 emulation is slow).
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --target builder \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .

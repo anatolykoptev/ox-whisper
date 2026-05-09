@@ -107,13 +107,11 @@ impl<T: Send + 'static> EvictablePool<T> {
     /// in this case the slot is left as `None` (not permanently dead — next acquire retries).
     pub fn acquire(&self) -> Result<EvictableGuard<T>, AcquireError> {
         let now = unix_now_secs();
-        let mut all_busy = true;
         for slot in &self.slots {
             // Skip slots that are already in use.
             if slot.busy.load(Ordering::Acquire) {
                 continue;
             }
-            all_busy = false;
 
             // ── M4: factory called OUTSIDE the mutex ─────────────────────────
             // Step 1: take lock, check state, claim slot for reinit if needed.
@@ -197,7 +195,6 @@ impl<T: Send + 'static> EvictablePool<T> {
                 item: Some(item),
             });
         }
-        let _ = all_busy;
         Err(AcquireError::AllBusy)
     }
 

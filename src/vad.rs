@@ -12,7 +12,13 @@ const WINDOW_SIZE: usize = 512;
 /// Feeds samples through Silero VAD in 512-sample windows, collects
 /// speech segments, and groups them into chunks of at most `max_chunk_s` seconds.
 /// Single segments longer than the limit are force-split.
-pub fn apply_vad(vad: &mut SileroVad, samples: &[f32], sample_rate: u32, pad_s: f32, max_chunk_s: usize) -> VadResult {
+pub fn apply_vad(
+    vad: &mut SileroVad,
+    samples: &[f32],
+    sample_rate: u32,
+    pad_s: f32,
+    max_chunk_s: usize,
+) -> VadResult {
     let pad_samples = (pad_s * sample_rate as f32) as usize;
     // Feed 512-sample windows
     let mut offset = 0;

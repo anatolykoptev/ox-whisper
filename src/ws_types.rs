@@ -21,10 +21,18 @@ pub struct WsParams {
     pub sample_rate: u32,
 }
 
-fn default_lang() -> String { "en".to_string() }
-fn default_true() -> bool { true }
-fn default_encoding() -> String { "pcm_s16le".to_string() }
-fn default_sample_rate() -> u32 { 16000 }
+fn default_lang() -> String {
+    "en".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_encoding() -> String {
+    "pcm_s16le".to_string()
+}
+fn default_sample_rate() -> u32 {
+    16000
+}
 
 /// Control messages sent by the client as JSON text frames.
 #[derive(Debug, Deserialize)]

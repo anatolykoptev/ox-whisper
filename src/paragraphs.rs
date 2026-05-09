@@ -1,5 +1,4 @@
 /// Auto-split transcription into paragraphs based on pauses between words.
-
 use crate::words::WordTimestamp;
 
 const DEFAULT_PAUSE_THRESHOLD_S: f32 = 1.5;

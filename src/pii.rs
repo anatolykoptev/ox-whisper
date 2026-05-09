@@ -1,5 +1,4 @@
 /// PII redaction — detect and replace personally identifiable information.
-
 use regex::Regex;
 
 use crate::words::WordTimestamp;
@@ -43,8 +42,12 @@ pub struct PiiRedactor {
 impl PiiRedactor {
     pub fn new() -> Self {
         Self {
-            phone_us: Regex::new(r"(?:\+1[\s.\-]?|\b)\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b").unwrap(),
-            phone_ru: Regex::new(r"(?:\+7|8)[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{2}[\s.\-]?\d{2}").unwrap(),
+            phone_us: Regex::new(r"(?:\+1[\s.\-]?|\b)\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b")
+                .unwrap(),
+            phone_ru: Regex::new(
+                r"(?:\+7|8)[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{2}[\s.\-]?\d{2}",
+            )
+            .unwrap(),
             phone_continuous: Regex::new(r"\b\d{10,11}\b").unwrap(),
             email: Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}").unwrap(),
             ssn: Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap(),
@@ -58,12 +61,7 @@ impl PiiRedactor {
         }
     }
 
-    pub fn redact_text(
-        &self,
-        text: &str,
-        types: &[PiiEntityType],
-        format: RedactFormat,
-    ) -> String {
+    pub fn redact_text(&self, text: &str, types: &[PiiEntityType], format: RedactFormat) -> String {
         let mut result = text.to_string();
         for &ty in types {
             let mut counter = 0u32;
@@ -143,7 +141,11 @@ fn replacement(label: &str, counter: u32, format: RedactFormat) -> String {
 }
 
 pub fn luhn_check(raw: &str) -> bool {
-    let digits: Vec<u32> = raw.chars().filter(|c| c.is_ascii_digit()).filter_map(|c| c.to_digit(10)).collect();
+    let digits: Vec<u32> = raw
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .filter_map(|c| c.to_digit(10))
+        .collect();
     if digits.len() < 13 {
         return false;
     }

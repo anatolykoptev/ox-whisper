@@ -1,8 +1,7 @@
+use crate::words::WordTimestamp;
 /// Custom spelling replacement — apply domain-specific word corrections.
-
 use serde::Deserialize;
 use strsim;
-use crate::words::WordTimestamp;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpellingRule {
@@ -63,9 +62,13 @@ fn replace_word_ci(text: &str, from: &str, to: &str) -> String {
 fn levenshtein_similarity(a: &str, b: &str) -> f64 {
     let a = a.to_lowercase();
     let b = b.to_lowercase();
-    if a == b { return 1.0; }
+    if a == b {
+        return 1.0;
+    }
     let max_len = a.chars().count().max(b.chars().count());
-    if max_len == 0 { return 1.0; }
+    if max_len == 0 {
+        return 1.0;
+    }
     1.0 - (strsim::levenshtein(&a, &b) as f64 / max_len as f64)
 }
 
@@ -102,7 +105,9 @@ pub fn apply_keyword_boost_to_words(
     threshold: f64,
 ) {
     for word in words.iter_mut() {
-        let clean = word.word.trim_end_matches(|c: char| c.is_ascii_punctuation());
+        let clean = word
+            .word
+            .trim_end_matches(|c: char| c.is_ascii_punctuation());
         if clean.chars().count() < 4 {
             for kw in keywords {
                 if clean.to_lowercase() == kw.to_lowercase() {

@@ -72,8 +72,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(handlers::health))
         .route("/transcribe", post(handlers::transcribe_json))
         .route("/transcribe/upload", post(handlers::transcribe_upload))
-        .route("/transcribe/stream", post(handler_stream::transcribe_stream))
-        .route("/v1/audio/transcriptions", post(handler_openai::transcriptions))
+        .route(
+            "/transcribe/stream",
+            post(handler_stream::transcribe_stream),
+        )
+        .route(
+            "/v1/audio/transcriptions",
+            post(handler_openai::transcriptions),
+        )
         .route("/v1/models", get(handler_openai::list_models))
         .route("/v1/listen", get(ws_handler::ws_listen))
         .layer(DefaultBodyLimit::max(max_body_size))

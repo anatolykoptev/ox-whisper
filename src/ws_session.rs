@@ -60,7 +60,9 @@ impl WsSession {
     /// Run VAD on the current buffer. Returns server messages and whether speech ended.
     /// Only triggers speech_final when we have >= 1s of audio and VAD found segments.
     pub fn run_vad_check(
-        &mut self, models: &Models, config: &Config,
+        &mut self,
+        models: &Models,
+        config: &Config,
     ) -> (Vec<ServerMessage>, bool) {
         let mut messages = Vec::new();
 
@@ -79,8 +81,11 @@ impl WsSession {
         };
 
         let result = apply_vad(
-            &mut vad, &self.buffer, self.sample_rate,
-            config.vad_speech_pad_s, config.vad_max_chunk_s,
+            &mut vad,
+            &self.buffer,
+            self.sample_rate,
+            config.vad_speech_pad_s,
+            config.vad_max_chunk_s,
         );
 
         let has_speech = !result.chunks.is_empty() && result.speech_ms > 0.0;
@@ -88,7 +93,9 @@ impl WsSession {
         if has_speech && !self.speech_detected {
             self.speech_detected = true;
             let offset = (self.total_samples - self.buffer.len()) as f64 / self.sample_rate as f64;
-            messages.push(ServerMessage::SpeechStarted { timestamp_s: offset });
+            messages.push(ServerMessage::SpeechStarted {
+                timestamp_s: offset,
+            });
         }
 
         // Speech final = VAD found speech AND speech portion is shorter than buffer
@@ -107,7 +114,10 @@ impl WsSession {
 
     /// Create a final Results message from transcription output.
     pub fn store_final(
-        &self, text: String, words: Vec<WordTimestamp>, from_finalize: bool,
+        &self,
+        text: String,
+        words: Vec<WordTimestamp>,
+        from_finalize: bool,
     ) -> ServerMessage {
         let confidence = avg_word_confidence(&words);
         ServerMessage::Results {
@@ -146,7 +156,11 @@ impl WsSession {
 
 fn avg_word_confidence(words: &[WordTimestamp]) -> f32 {
     let confs: Vec<f32> = words.iter().filter_map(|w| w.confidence).collect();
-    if confs.is_empty() { 0.0 } else { confs.iter().sum::<f32>() / confs.len() as f32 }
+    if confs.is_empty() {
+        0.0
+    } else {
+        confs.iter().sum::<f32>() / confs.len() as f32
+    }
 }
 
 /// Decode raw PCM bytes into f32 samples.

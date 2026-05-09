@@ -7,7 +7,9 @@ pub fn sanitize_utf8(text: &str) -> String {
         result = result.replace("  ", " ");
     }
     // Remove leading punctuation (common model artifact)
-    result = result.trim_start_matches(|c: char| c == ',' || c == '.' || c == ' ').to_string();
+    result = result
+        .trim_start_matches(|c: char| c == ',' || c == '.' || c == ' ')
+        .to_string();
     result = result.trim().to_string();
     result
 }

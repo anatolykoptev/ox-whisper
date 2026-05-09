@@ -2,21 +2,43 @@
 
 fn number_value_ru(word: &str) -> Option<i64> {
     match word {
-        "ноль" => Some(0), "один" | "одна" | "одно" => Some(1),
-        "два" | "две" => Some(2), "три" => Some(3), "четыре" => Some(4),
-        "пять" => Some(5), "шесть" => Some(6), "семь" => Some(7),
-        "восемь" => Some(8), "девять" => Some(9), "десять" => Some(10),
-        "одиннадцать" => Some(11), "двенадцать" => Some(12),
-        "тринадцать" => Some(13), "четырнадцать" => Some(14),
-        "пятнадцать" => Some(15), "шестнадцать" => Some(16),
-        "семнадцать" => Some(17), "восемнадцать" => Some(18),
+        "ноль" => Some(0),
+        "один" | "одна" | "одно" => Some(1),
+        "два" | "две" => Some(2),
+        "три" => Some(3),
+        "четыре" => Some(4),
+        "пять" => Some(5),
+        "шесть" => Some(6),
+        "семь" => Some(7),
+        "восемь" => Some(8),
+        "девять" => Some(9),
+        "десять" => Some(10),
+        "одиннадцать" => Some(11),
+        "двенадцать" => Some(12),
+        "тринадцать" => Some(13),
+        "четырнадцать" => Some(14),
+        "пятнадцать" => Some(15),
+        "шестнадцать" => Some(16),
+        "семнадцать" => Some(17),
+        "восемнадцать" => Some(18),
         "девятнадцать" => Some(19),
-        "двадцать" => Some(20), "тридцать" => Some(30), "сорок" => Some(40),
-        "пятьдесят" => Some(50), "шестьдесят" => Some(60),
-        "семьдесят" => Some(70), "восемьдесят" => Some(80), "девяносто" => Some(90),
-        "сто" => Some(100), "двести" => Some(200), "триста" => Some(300),
-        "четыреста" => Some(400), "пятьсот" => Some(500), "шестьсот" => Some(600),
-        "семьсот" => Some(700), "восемьсот" => Some(800), "девятьсот" => Some(900),
+        "двадцать" => Some(20),
+        "тридцать" => Some(30),
+        "сорок" => Some(40),
+        "пятьдесят" => Some(50),
+        "шестьдесят" => Some(60),
+        "семьдесят" => Some(70),
+        "восемьдесят" => Some(80),
+        "девяносто" => Some(90),
+        "сто" => Some(100),
+        "двести" => Some(200),
+        "триста" => Some(300),
+        "четыреста" => Some(400),
+        "пятьсот" => Some(500),
+        "шестьсот" => Some(600),
+        "семьсот" => Some(700),
+        "восемьсот" => Some(800),
+        "девятьсот" => Some(900),
         _ => None,
     }
 }
@@ -44,7 +66,9 @@ fn words_to_number_ru(words: &[&str], start: usize) -> Option<(i64, usize)> {
             consumed += 1;
             i += 1;
         } else if let Some(s) = scale_value_ru(&w) {
-            if current == 0 { current = 1; }
+            if current == 0 {
+                current = 1;
+            }
             result += current * s;
             current = 0;
             has_number = true;
@@ -54,7 +78,11 @@ fn words_to_number_ru(words: &[&str], start: usize) -> Option<(i64, usize)> {
             break;
         }
     }
-    if has_number { Some((result + current, consumed)) } else { None }
+    if has_number {
+        Some((result + current, consumed))
+    } else {
+        None
+    }
 }
 
 fn format_number_suffix_ru(n: i64, next: Option<&str>) -> (String, bool) {
@@ -63,7 +91,9 @@ fn format_number_suffix_ru(n: i64, next: Option<&str>) -> (String, bool) {
         Some("рубль" | "рубля" | "рублей") => (format!("{n} руб."), true),
         Some("доллар" | "доллара" | "долларов") => (format!("${n}"), true),
         Some("евро") => (format!("\u{20ac}{n}"), true),
-        Some("процент" | "процента" | "процентов") => (format!("{n}%"), true),
+        Some("процент" | "процента" | "процентов") => {
+            (format!("{n}%"), true)
+        }
         _ => (n.to_string(), false),
     }
 }

@@ -1,10 +1,14 @@
-.PHONY: build test lint fmt check deploy
+.PHONY: build test test-doc lint fmt check deploy
 
 build:
 	cargo build
 
 test:
-	cargo test
+	cargo nextest run --workspace
+	cargo test --workspace --doc
+
+test-doc:
+	cargo test --workspace --doc
 
 lint:
 	cargo clippy -- -D warnings

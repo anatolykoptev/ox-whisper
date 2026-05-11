@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.0](https://github.com/anatolykoptev/ox-whisper/compare/v0.7.0...v0.8.0) (2026-05-11)
+
+
+### Features
+
+* **docker:** add sccache + mold для signal-grade build cache ([#26](https://github.com/anatolykoptev/ox-whisper/issues/26)) ([54682c2](https://github.com/anatolykoptev/ox-whisper/commit/54682c27b37bda5eae79123f84d77c136c9b16f2))
+* **security:** add cargo-deny config + adopt nextest ([#24](https://github.com/anatolykoptev/ox-whisper/issues/24)) ([6876b0a](https://github.com/anatolykoptev/ox-whisper/commit/6876b0a4db1d4efe4ea10d39cd8f244a35f19c3f))
+
+
+### Bug Fixes
+
+* **docker:** remove RUSTC_WRAPPER=sccache to fix E0463 tracing_attributes ([#27](https://github.com/anatolykoptev/ox-whisper/issues/27)) ([5b9da89](https://github.com/anatolykoptev/ox-whisper/commit/5b9da8928994f8c70e84b00e84ebf3bd30f8f785))
+
 ## [0.7.0](https://github.com/anatolykoptev/ox-whisper/compare/v0.6.1...v0.7.0) (2026-05-09)
 
 

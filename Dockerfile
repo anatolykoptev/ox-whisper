@@ -22,10 +22,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 3: Builder
 FROM chef AS builder
 
-ENV RUSTC_WRAPPER=sccache
-ENV SCCACHE_DIR=/sccache
-ENV SCCACHE_CACHE_SIZE=20G
-ENV SCCACHE_IDLE_TIMEOUT=0
+# mold linker via per-arch CARGO_TARGET_* — no RUSTC_WRAPPER=sccache here.
+# ox-whisper is a 1-crate workspace; the only crate recompiling on source changes
+# is ox-whisper itself (not cacheable by sccache). Deps are handled by cargo-chef
+# cook + target/ cache mount. sccache proc-macro caching causes E0463 on
+# tracing_attributes: sccache returns a metadata hit but doesn't restore the
+# proc-macro .so to the path cargo expects. mold still active (3-5x faster link).
+# sccache binary installed in chef stage remains available for dist-sccache use.
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=clang
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang
@@ -43,7 +46,6 @@ COPY Cargo.toml Cargo.lock ./
 ENV SHERPA_LIB_PATH=/app/vendor/sherpa-onnx
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    --mount=type=cache,target=/sccache \
     cargo chef cook --release --locked --recipe-path recipe.json
 
 # Build actual binary. Touch src/main.rs to bust cargo's fingerprint
@@ -52,12 +54,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY src/ src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    --mount=type=cache,target=/sccache \
     touch src/main.rs && \
     rm -f /app/target/release/ox-whisper && \
     cargo build --release --locked --bin ox-whisper && \
     cp target/release/ox-whisper /binary && \
-    sccache --show-stats || true && \
     test "$(stat -c %s /binary)" -gt 1000000 || (echo "ERROR: binary too small ($(stat -c %s /binary) bytes), build did not link"; exit 1)
 
 # Stage 4: Runtime

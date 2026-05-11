@@ -2,7 +2,15 @@
 
 # Stage 1: Chef
 FROM rust:1.88-bookworm AS chef
-RUN apt-get update && apt-get install -y --no-install-recommends cmake libclang-dev pkg-config && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends cmake libclang-dev pkg-config clang mold curl && rm -rf /var/lib/apt/lists/*
+# sccache: content-addressed compiler cache — hits survive BuildKit cache
+# invalidation on source changes; mold replaces gold linker (3-5x faster link).
+# mold is CXX-compat (sherpa-rs vendored bindings compile via clang+mold fine).
+ENV SCCACHE_VERSION=0.10.0
+RUN ARCH=$(uname -m) && \
+    curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" \
+    | tar xz --strip-components=1 -C /usr/local/bin "sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl/sccache" && \
+    chmod +x /usr/local/bin/sccache
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
@@ -13,6 +21,15 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 3: Builder
 FROM chef AS builder
+
+ENV RUSTC_WRAPPER=sccache
+ENV SCCACHE_DIR=/sccache
+ENV SCCACHE_CACHE_SIZE=20G
+ENV SCCACHE_IDLE_TIMEOUT=0
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=clang
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 
 # Copy vendored deps first (rarely changes). Minimum-vendor: only Rust
 # binding files of sherpa-rs-sys are tracked; the C++ submodule is absent.
@@ -26,6 +43,7 @@ COPY Cargo.toml Cargo.lock ./
 ENV SHERPA_LIB_PATH=/app/vendor/sherpa-onnx
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/sccache \
     cargo chef cook --release --locked --recipe-path recipe.json
 
 # Build actual binary. Touch src/main.rs to bust cargo's fingerprint
@@ -34,10 +52,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY src/ src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/sccache \
     touch src/main.rs && \
     rm -f /app/target/release/ox-whisper && \
     cargo build --release --locked --bin ox-whisper && \
     cp target/release/ox-whisper /binary && \
+    sccache --show-stats || true && \
     test "$(stat -c %s /binary)" -gt 1000000 || (echo "ERROR: binary too small ($(stat -c %s /binary) bytes), build did not link"; exit 1)
 
 # Stage 4: Runtime

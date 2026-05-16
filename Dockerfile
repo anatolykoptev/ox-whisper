@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends cmake libclang-
 # sccache: content-addressed compiler cache — hits survive BuildKit cache
 # invalidation on source changes; mold replaces gold linker (3-5x faster link).
 # mold is CXX-compat (sherpa-rs vendored bindings compile via clang+mold fine).
-ENV SCCACHE_VERSION=0.10.0
+ENV SCCACHE_VERSION=0.15.0
 RUN ARCH=$(uname -m) && \
     curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" \
     | tar xz --strip-components=1 -C /usr/local/bin "sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl/sccache" && \
@@ -46,6 +46,7 @@ COPY Cargo.toml Cargo.lock ./
 ENV SHERPA_LIB_PATH=/app/vendor/sherpa-onnx
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/root/.cache/sccache,sharing=locked \
     cargo chef cook --release --locked --recipe-path recipe.json
 
 # Build actual binary. Touch src/main.rs to bust cargo's fingerprint
@@ -54,6 +55,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY src/ src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/root/.cache/sccache,sharing=locked \
     touch src/main.rs && \
     rm -f /app/target/release/ox-whisper && \
     cargo build --release --locked --bin ox-whisper && \

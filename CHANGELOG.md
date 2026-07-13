@@ -1,13 +1,5 @@
 # Changelog
 
-## [0.8.1](https://github.com/anatolykoptev/ox-whisper/compare/v0.8.0...v0.8.1) (2026-07-13)
-
-
-### Fixed
-
-* address panic/correctness bugs from issue [#29](https://github.com/anatolykoptev/ox-whisper/issues/29) ([6d8c695](https://github.com/anatolykoptev/ox-whisper/commit/6d8c6951653e240289ed7b71e84e205c1693d7c4))
-* **pool:** prevent race on evicted-slot reinit ([5403353](https://github.com/anatolykoptev/ox-whisper/commit/5403353e7f77d3b88c870ad61840b646cbb83c78))
-
 ## [0.8.0](https://github.com/anatolykoptev/ox-whisper/compare/v0.7.0...v0.8.0) (2026-05-11)
 
 

@@ -237,7 +237,7 @@ fn format_response(
             let body = VerboseJsonResponse {
                 text: result.text.clone(),
                 language: lang.to_string(),
-                duration: result.duration_ms / 1000.0,
+                duration: result.audio_duration_ms / 1000.0,
                 segments,
                 words,
                 language_confidence,

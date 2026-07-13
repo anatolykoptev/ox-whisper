@@ -51,8 +51,15 @@ pub fn apply_vad(
         .map(|s| s.samples.len() as f64 / sample_rate as f64 * 1000.0)
         .sum();
 
-    // Group segments into chunks, force-splitting segments exceeding the limit
+    // Group segments into chunks, force-splitting segments exceeding the limit.
+    // A max_chunk_s of 0 means "no limit" — avoid the infinite loop that a
+    // zero capacity would otherwise create.
     let max_chunk_samples = max_chunk_s * sample_rate as usize;
+    let max_chunk_samples = if max_chunk_samples == 0 {
+        usize::MAX
+    } else {
+        max_chunk_samples
+    };
     let mut chunks: Vec<Vec<f32>> = Vec::new();
     let mut current_chunk: Vec<f32> = Vec::new();
 

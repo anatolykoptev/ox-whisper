@@ -2,44 +2,40 @@
 # The binary and Docker publish steps run in the SAME workflow so a
 # GITHUB_TOKEN-created tag can trigger them (a separate tag-triggered workflow
 # would be blocked by the Actions recursion guard).
+# Matches the release-please-setup skill's `release-please-binary.yml` template.
+
 name: Release
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Existing release tag to build/publish assets for (skips release-please PR creation)'
-        required: false
-        default: ''
+  workflow_dispatch: {}
 
-permissions:
-  contents: write
-  pull-requests: write
+# Default: least privilege. Grant only what each job needs.
+permissions: {}
 
 jobs:
   release-please:
     name: Release PR / tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created || steps.release-override.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name || steps.release-override.outputs.tag_name }}
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      major: ${{ steps.release.outputs.major }}
+      minor: ${{ steps.release.outputs.minor }}
+      patch: ${{ steps.release.outputs.patch }}
     steps:
       - name: Run release-please
         uses: googleapis/release-please-action@v4
         id: release
-        if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-      - name: Use manually supplied release tag
-        id: release-override
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-        run: |
-          echo "release_created=true" >> "$GITHUB_OUTPUT"
-          echo "tag_name=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
 
   build-and-release:
     name: Build and release binary
@@ -77,10 +73,10 @@ jobs:
           cd dist && tar czf ../ox-whisper-linux-aarch64.tar.gz ox-whisper/
 
       - name: Upload to release
-        run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" ox-whisper-linux-aarch64.tar.gz --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: ox-whisper-linux-aarch64.tar.gz
 
   docker-release:
     name: Build and push Docker image

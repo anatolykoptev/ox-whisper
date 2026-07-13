@@ -56,7 +56,9 @@ jobs:
       - name: Package binary + shared libs
         run: |
           mkdir -p dist/ox-whisper
-          cp out/app/target/release/ox-whisper dist/ox-whisper/
+          # The Dockerfile's builder stage copies the linked binary to /binary;
+          # /app/target is a cache mount and is not exported by type=local.
+          cp out/binary dist/ox-whisper/ox-whisper
           cp out/app/vendor/sherpa-onnx/lib/libsherpa-onnx-c-api.so dist/ox-whisper/
           cp out/app/vendor/sherpa-onnx/lib/libsherpa-onnx-cxx-api.so dist/ox-whisper/
           cp out/app/vendor/sherpa-onnx/lib/libonnxruntime.so dist/ox-whisper/

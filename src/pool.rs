@@ -114,28 +114,28 @@ impl<T: Send + 'static> EvictablePool<T> {
             }
 
             // ── M4: factory called OUTSIDE the mutex ─────────────────────────
-            // Step 1: take lock, check state, claim slot for reinit if needed.
-            let needs_reinit = {
-                let guard = match slot.item.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => {
-                        tracing::warn!("pool mutex poisoned — recovering inner value");
-                        metrics::counter!(crate::metrics::names::POOL_MUTEX_POISONED).increment(1);
-                        poisoned.into_inner()
-                    }
-                };
-                // Re-check busy inside lock to avoid TOCTOU.
-                if slot.busy.load(Ordering::Acquire) {
-                    continue;
+            // Take lock, re-check busy, and claim the slot before releasing the
+            // mutex. Setting busy=true while the lock is held prevents another
+            // acquire from racing on the same evicted slot and avoids evict_idle
+            // sniping the item between the unlock and the factory call.
+            let mut guard = match slot.item.lock() {
+                Ok(g) => g,
+                Err(poisoned) => {
+                    tracing::warn!("pool mutex poisoned — recovering inner value");
+                    metrics::counter!(crate::metrics::names::POOL_MUTEX_POISONED).increment(1);
+                    poisoned.into_inner()
                 }
-                guard.is_none()
             };
+            if slot.busy.load(Ordering::Acquire) {
+                continue;
+            }
 
-            if needs_reinit {
-                // Step 2: mark busy to prevent eviction while we reinit.
+            if guard.is_none() {
+                // Claim this slot for reinit and release the lock before the
+                // (potentially slow) factory call.
                 slot.busy.store(true, Ordering::Release);
+                drop(guard);
 
-                // Step 3: call factory WITHOUT holding the mutex.
                 metrics::counter!(crate::metrics::names::POOL_COLD_STARTS).increment(1);
                 tracing::info!("pool cold start: reinitializing evicted slot");
                 let new_item = match (self.factory)() {
@@ -149,7 +149,7 @@ impl<T: Send + 'static> EvictablePool<T> {
                     }
                 };
 
-                // Step 4: take lock again, store item, take it out for the guard.
+                // Store the new item and return it under the lock.
                 let mut guard = match slot.item.lock() {
                     Ok(g) => g,
                     Err(poisoned) => {
@@ -170,20 +170,8 @@ impl<T: Send + 'static> EvictablePool<T> {
             }
 
             // Slot has an item — claim it under lock.
-            let mut guard = match slot.item.lock() {
-                Ok(g) => g,
-                Err(poisoned) => {
-                    tracing::warn!("pool mutex poisoned — recovering inner value");
-                    metrics::counter!(crate::metrics::names::POOL_MUTEX_POISONED).increment(1);
-                    poisoned.into_inner()
-                }
-            };
             // ── B1: set busy BEFORE releasing MutexGuard ─────────────────────
             // This prevents a race window between mutex unlock and busy.store.
-            if slot.busy.load(Ordering::Acquire) {
-                // Another thread grabbed it between our check and the lock.
-                continue;
-            }
             slot.busy.store(true, Ordering::Release);
             slot.last_used.store(now, Ordering::Relaxed);
             let item = guard

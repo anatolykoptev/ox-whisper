@@ -100,6 +100,7 @@ fn do_transcribe_streaming(
         text,
         chunks: Vec::new(),
         duration_ms: 0.0,
+        audio_duration_ms: duration * 1000.0,
         speech_ms,
         words: Vec::new(),
     })

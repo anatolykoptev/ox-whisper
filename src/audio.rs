@@ -36,11 +36,16 @@ pub fn pcm_to_f32(data: &[u8], header: &WavHeader) -> Result<Vec<f32>, AudioErro
             header.bits_per_sample
         )));
     }
-    if header.channels > 2 {
+    if header.channels == 0 || header.channels > 2 {
         return Err(AudioError::UnsupportedFormat(format!(
             "{}-channel audio not supported",
             header.channels
         )));
+    }
+    if header.sample_rate == 0 {
+        return Err(AudioError::UnsupportedFormat(
+            "0 Hz sample rate is not supported".to_string(),
+        ));
     }
     let pcm = &data[44..];
     let bytes_per_frame = (header.channels * 2) as usize;

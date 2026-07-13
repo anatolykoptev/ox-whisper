@@ -99,26 +99,25 @@ pub fn apply_keyword_boost(text: &str, keywords: &[String], threshold: f64) -> S
 }
 
 /// Apply keyword boost to word timestamps.
+/// Strips trailing punctuation before comparing and re-attaches it to the replacement.
 pub fn apply_keyword_boost_to_words(
     words: &mut [WordTimestamp],
     keywords: &[String],
     threshold: f64,
 ) {
     for word in words.iter_mut() {
-        let clean = word
-            .word
-            .trim_end_matches(|c: char| c.is_ascii_punctuation());
+        let (clean, punct) = split_trailing_punct(&word.word);
         if clean.chars().count() < 4 {
             for kw in keywords {
                 if clean.to_lowercase() == kw.to_lowercase() {
-                    word.word = kw.clone();
+                    word.word = format!("{kw}{punct}");
                     break;
                 }
             }
         } else {
             for kw in keywords {
                 if levenshtein_similarity(clean, kw) >= threshold {
-                    word.word = kw.clone();
+                    word.word = format!("{kw}{punct}");
                     break;
                 }
             }

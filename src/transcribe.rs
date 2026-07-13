@@ -51,6 +51,7 @@ pub struct TranscribeResult {
     pub text: String,
     pub chunks: Vec<String>,
     pub duration_ms: f64,
+    pub audio_duration_ms: f64,
     pub speech_ms: f64,
     pub words: Vec<WordTimestamp>,
 }
@@ -180,6 +181,7 @@ fn do_transcribe(
         text,
         chunks,
         duration_ms: 0.0,
+        audio_duration_ms: duration * 1000.0,
         speech_ms,
         words,
     })
@@ -265,7 +267,7 @@ fn transcribe_en(
                 "EN chunk {}: ratio {:.2}, skip: {:?}",
                 i,
                 ratio,
-                &text[..text.len().min(80)]
+                text.chars().take(80).collect::<String>()
             );
             metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "en").increment(1);
         } else {
@@ -358,7 +360,7 @@ pub(crate) fn maybe_punctuate(
 }
 
 pub(crate) fn split_audio_chunks(samples: Vec<f32>, max_chunk_samples: usize) -> Vec<Vec<f32>> {
-    if samples.len() <= max_chunk_samples {
+    if max_chunk_samples == 0 || samples.len() <= max_chunk_samples {
         return vec![samples];
     }
     samples
@@ -374,5 +376,5 @@ pub(crate) fn compression_ratio(text: &str) -> f64 {
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
     enc.write_all(text.as_bytes()).ok();
     let compressed = enc.finish().unwrap_or_default();
-    text.len() as f64 / compressed.len() as f64
+    text.len() as f64 / compressed.len().max(1) as f64
 }

@@ -56,6 +56,13 @@ pub fn split_text(text: &str, max_len: usize) -> Vec<String> {
 
     while remaining.len() > max_len {
         let split_at = find_split_point(remaining, max_len);
+        // If the max_len falls inside a multi-byte character, find_split_point
+        // can return 0. Force progress by at least one character boundary.
+        let split_at = if split_at == 0 {
+            remaining.char_indices().nth(1).map(|(i, _)| i).unwrap_or(remaining.len())
+        } else {
+            split_at
+        };
         let chunk = remaining[..split_at].trim();
         if !chunk.is_empty() {
             chunks.push(chunk.to_string());

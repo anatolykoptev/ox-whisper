@@ -228,11 +228,11 @@ pub(crate) async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData
                 file_path = Some(std::path::PathBuf::from(tmp));
             }
             "language" => language = field.text().await.unwrap_or_default(),
-            "vad" => vad = field.text().await.unwrap_or_default().parse().ok(),
+            "vad" => vad = parse_bool(&field.text().await.unwrap_or_default()),
             "max_chunk_len" => {
                 max_chunk_len = field.text().await.unwrap_or_default().parse().unwrap_or(0)
             }
-            "punctuate" => punctuate = field.text().await.unwrap_or_default().parse().ok(),
+            "punctuate" => punctuate = parse_bool(&field.text().await.unwrap_or_default()),
             _ => {}
         }
     }
@@ -278,6 +278,14 @@ fn to_response(
             confidence: None,
             error: Some(e.to_string()),
         }),
+    }
+}
+
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.trim().to_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
     }
 }
 

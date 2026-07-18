@@ -30,7 +30,7 @@
 ## Deploy
 
 ```bash
-cd ~/deploy/krolik-server
+cd ~/deploy/server-config
 docker compose build --no-cache ox-whisper && docker compose up -d --no-deps --force-recreate ox-whisper
 ```
 

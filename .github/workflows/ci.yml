@@ -23,7 +23,7 @@ jobs:
         run: cargo fmt --check
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     # `actions: write` required for `--cache-to type=gha,mode=max` (GHA cache write API).
     permissions:
       contents: read
@@ -31,18 +31,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build via Docker (aarch64)
-        # GHA cache — saves ~30-40 min on warm runs (QEMU aarch64 emulation is slow).
+        # Native arm64 runner — QEMU emulation made the C++/ggml qwentts
+        # build prohibitive. Full image (all stages) is built so the
+        # qwentts-build stage is covered; GHA cache saves ~30-40 min on
+        # warm runs.
         run: |
           docker buildx build \
             --platform linux/arm64 \
-            --target builder \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
             .
+
+  test:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install --no-self-update
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # sherpa-rs-sys is minimum-vendored: build.rs links the prebuilt .so
+      # in vendor/sherpa-onnx/lib via SHERPA_LIB_PATH and uses the committed
+      # src/bindings.rs — no C++ toolchain needed.
+      - name: Run tests
+        run: cargo nextest run --workspace
+        env:
+          SHERPA_LIB_PATH: ${{ github.workspace }}/vendor/sherpa-onnx
+          LD_LIBRARY_PATH: ${{ github.workspace }}/vendor/sherpa-onnx/lib

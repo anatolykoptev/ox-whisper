@@ -48,6 +48,80 @@ pub struct Config {
     pub prom_port: u16,
     /// Idle eviction threshold in seconds (OX_WHISPER_IDLE_EVICT_SECS, default: 0 = disabled)
     pub idle_evict_secs: u64,
+    /// Text-to-speech child process settings (TTS_* env vars)
+    pub tts: TtsConfig,
+}
+
+/// Text-to-speech child-process configuration.
+///
+/// The TTS engine is an external `tts-server` binary run as a child process on
+/// the loopback interface. When `upstream_url` is set no child is managed and
+/// the supervisor hands out that URL instead.
+// Several fields are read only by tts::supervisor — dead in the bin target
+// until the speech proxy lands (see src/tts/mod.rs).
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub struct TtsConfig {
+    /// Enable TTS supervision (TTS_ENABLED, default: false)
+    pub enabled: bool,
+    /// Path to the tts-server binary (TTS_BIN, default: "/opt/qwentts/tts-server")
+    pub bin: String,
+    /// Talker model path, passed as `--model` (TTS_MODEL)
+    pub model: String,
+    /// Codec model path, passed as `--codec` (TTS_CODEC)
+    pub codec: String,
+    /// Loopback port the child binds (TTS_PORT, default: 8093)
+    pub port: u16,
+    /// CPU threads for the child via `QT_N_THREADS` (TTS_THREADS,
+    /// default: max(1, available_parallelism - 1))
+    pub threads: usize,
+    /// `--max-batch` value (TTS_MAX_BATCH, default: 2)
+    pub max_batch: usize,
+    /// Stop the child after this many seconds without in-flight requests
+    /// (TTS_IDLE_STOP_SECS, default: 600, 0 = never stop)
+    pub idle_stop_secs: u64,
+    /// Startup health-check timeout (TTS_STARTUP_TIMEOUT_SECS, default: 60)
+    pub startup_timeout_secs: u64,
+    /// External TTS endpoint; when set no child is spawned (TTS_UPSTREAM_URL)
+    pub upstream_url: Option<String>,
+}
+
+impl TtsConfig {
+    /// Parses TTS configuration from environment variables.
+    pub fn from_env() -> Self {
+        let default_threads = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1).max(1))
+            .unwrap_or(1);
+        Self {
+            enabled: env::var("TTS_ENABLED")
+                .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1"))
+                .unwrap_or(false),
+            bin: env::var("TTS_BIN").unwrap_or_else(|_| "/opt/qwentts/tts-server".to_string()),
+            model: env::var("TTS_MODEL").unwrap_or_default(),
+            codec: env::var("TTS_CODEC").unwrap_or_default(),
+            port: env::var("TTS_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8093),
+            threads: env::var("TTS_THREADS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default_threads),
+            max_batch: env::var("TTS_MAX_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
+            idle_stop_secs: env::var("TTS_IDLE_STOP_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
+            startup_timeout_secs: env::var("TTS_STARTUP_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            upstream_url: env::var("TTS_UPSTREAM_URL").ok().filter(|s| !s.is_empty()),
+        }
+    }
 }
 
 impl Config {
@@ -127,6 +201,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            tts: TtsConfig::from_env(),
         }
     }
 }

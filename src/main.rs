@@ -26,6 +26,7 @@ mod smart_format;
 mod spelling;
 mod streaming;
 mod transcribe;
+mod tts;
 mod upload;
 mod vad;
 mod words;
@@ -66,7 +67,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Loading models...");
     let models = Models::load(&config);
 
-    let state = Arc::new(AppState { models, config });
+    // TTS child supervision is lazy: the supervisor exists but the tts-server
+    // child is not spawned until the first ensure_ready() call.
+    let tts = if config.tts.enabled {
+        let sup = Arc::new(crate::tts::TtsSupervisor::new(config.tts.clone()));
+        match &config.tts.upstream_url {
+            Some(url) => {
+                tracing::info!("TTS enabled via external upstream {url} (no managed child)");
+            }
+            None => {
+                if config.tts.model.is_empty() || config.tts.codec.is_empty() {
+                    tracing::warn!(
+                        "TTS_ENABLED but TTS_MODEL/TTS_CODEC unset — first TTS request will fail to spawn"
+                    );
+                }
+                if config.tts.idle_stop_secs > 0 {
+                    let tick = std::time::Duration::from_secs(config.tts.idle_stop_secs / 4)
+                        .max(std::time::Duration::from_secs(1));
+                    sup.spawn_idle_loop(tick);
+                    tracing::info!(
+                        idle_stop_secs = config.tts.idle_stop_secs,
+                        ?tick,
+                        "TTS idle-stop enabled"
+                    );
+                }
+            }
+        }
+        Some(sup)
+    } else {
+        None
+    };
+
+    let state = Arc::new(AppState {
+        models,
+        config,
+        tts,
+    });
 
     let app = Router::new()
         .route("/health", get(handlers::health))

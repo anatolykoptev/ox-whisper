@@ -19,6 +19,16 @@ pub mod names {
     pub const POOL_REINIT_FAILURES: &str = "oxwhisper_pool_reinit_failures_total";
     pub const POOL_EVICTION_LOOP_PANICS: &str = "oxwhisper_pool_eviction_loop_panics_total";
     pub const POOL_MUTEX_POISONED: &str = "oxwhisper_pool_mutex_poisoned_total";
+    // Referenced only from tts::supervisor — dead in the bin target until the
+    // speech proxy lands (see src/tts/mod.rs).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const TTS_CHILD_UP: &str = "oxwhisper_tts_child_up";
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const TTS_CHILD_STARTS: &str = "oxwhisper_tts_child_starts_total";
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const TTS_CHILD_RESTARTS: &str = "oxwhisper_tts_child_restarts_total";
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const TTS_CHILD_STOPS: &str = "oxwhisper_tts_child_stops_total";
 }
 
 pub fn install_recorder() -> PrometheusHandle {

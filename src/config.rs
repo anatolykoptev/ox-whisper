@@ -86,12 +86,43 @@ pub struct TtsConfig {
     pub upstream_url: Option<String>,
 }
 
+/// Parses a numeric env var with a minimum. An unparsable or too-small value
+/// warns and falls back to `default` — the repo's config convention.
+fn env_num<T>(name: &str, min: T, default: T) -> T
+where
+    T: std::str::FromStr + PartialOrd + Copy + std::fmt::Display,
+{
+    match env::var(name) {
+        Ok(v) => match v.trim().parse::<T>() {
+            Ok(n) if n >= min => n,
+            _ => {
+                tracing::warn!("{name}={v:?} invalid (want >= {min}); using default {default}");
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
+
 impl TtsConfig {
-    /// Parses TTS configuration from environment variables.
-    pub fn from_env() -> Self {
+    /// Parses TTS configuration from environment variables. `moonshine_port`
+    /// and `prom_port` are the ports already claimed by this process — the
+    /// TTS child must not share them.
+    pub fn from_env(moonshine_port: u16, prom_port: u16) -> Self {
+        const TTS_PORT_DEFAULT: u16 = 8093;
         let default_threads = std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(1).max(1))
             .unwrap_or(1);
+        let mut port = env_num("TTS_PORT", 1, TTS_PORT_DEFAULT);
+        if port == moonshine_port || port == prom_port {
+            tracing::warn!(
+                "TTS_PORT={port} collides with the STT or metrics port; using {TTS_PORT_DEFAULT}"
+            );
+            port = TTS_PORT_DEFAULT;
+        }
+        if port == moonshine_port || port == prom_port {
+            tracing::warn!("default TTS port {port} also collides — set TTS_PORT to a free port");
+        }
         Self {
             enabled: env::var("TTS_ENABLED")
                 .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1"))
@@ -99,26 +130,11 @@ impl TtsConfig {
             bin: env::var("TTS_BIN").unwrap_or_else(|_| "/opt/qwentts/tts-server".to_string()),
             model: env::var("TTS_MODEL").unwrap_or_default(),
             codec: env::var("TTS_CODEC").unwrap_or_default(),
-            port: env::var("TTS_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(8093),
-            threads: env::var("TTS_THREADS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default_threads),
-            max_batch: env::var("TTS_MAX_BATCH")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(2),
-            idle_stop_secs: env::var("TTS_IDLE_STOP_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(600),
-            startup_timeout_secs: env::var("TTS_STARTUP_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60),
+            port,
+            threads: env_num("TTS_THREADS", 1, default_threads),
+            max_batch: env_num("TTS_MAX_BATCH", 1, 2),
+            idle_stop_secs: env_num("TTS_IDLE_STOP_SECS", 0, 600),
+            startup_timeout_secs: env_num("TTS_STARTUP_TIMEOUT_SECS", 1, 60),
             upstream_url: env::var("TTS_UPSTREAM_URL").ok().filter(|s| !s.is_empty()),
         }
     }
@@ -127,11 +143,16 @@ impl TtsConfig {
 impl Config {
     /// Parses configuration from environment variables with sensible defaults.
     pub fn from_env() -> Self {
+        let port = env::var("MOONSHINE_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8092);
+        let prom_port = env::var("OXWHISPER_PROM_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(9092);
         Self {
-            port: env::var("MOONSHINE_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(8092),
+            port,
             models_dir: env::var("MOONSHINE_MODELS_DIR").unwrap_or_else(|_| "/models".to_string()),
             ru_models_dir: env::var("ZIPFORMER_RU_DIR")
                 .unwrap_or_else(|_| "/ru-models".to_string()),
@@ -193,15 +214,12 @@ impl Config {
                 .unwrap_or_else(|_| "/diarize/segmentation.onnx".to_string()),
             diarize_embedding_model: env::var("DIARIZE_EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "/diarize/embedding.onnx".to_string()),
-            prom_port: env::var("OXWHISPER_PROM_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(9092),
+            prom_port,
             idle_evict_secs: env::var("OX_WHISPER_IDLE_EVICT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
-            tts: TtsConfig::from_env(),
+            tts: TtsConfig::from_env(port, prom_port),
         }
     }
 }

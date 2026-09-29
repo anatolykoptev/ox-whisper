@@ -70,7 +70,15 @@ fn marker(name: &str, port: u16) -> PathBuf {
 }
 
 fn cleanup_markers(port: u16) {
-    for name in ["crash", "delay", "oom", "exit", "hang", "sigterm"] {
+    for name in [
+        "crash",
+        "delay",
+        "oom",
+        "exit",
+        "hang",
+        "sigterm",
+        "ignoreterm",
+    ] {
         let _ = std::fs::remove_file(marker(name, port));
     }
 }
@@ -364,6 +372,9 @@ async fn r1_dropped_caller_keeps_start() {
 
 // ── R2: a failed start is shared by every waiter ────────────────────────
 // Mutation: let each waiter start its own generation -> RED.
+// Mutation: in on_child_exit's crash branch drop the `healthy_for.is_some()`
+// gate on the TTS_CHILD_RESTARTS increment -> RED (one startup death counted
+// as both a start failure and a crash).
 #[tokio::test]
 #[serial]
 async fn r2_failed_start_shared_by_waiters() {
@@ -373,6 +384,8 @@ async fn r2_failed_start_shared_by_waiters() {
     std::fs::write(marker("exit", port), "").unwrap(); // child exits at once
     let sup = Arc::new(TtsSupervisor::new(test_config(fake_bin(), port, 0, 10)));
     let before = metric("oxwhisper_tts_child_starts_total");
+    let restarts_before = metric("oxwhisper_tts_child_restarts_total");
+    let exits_before = metric("oxwhisper_tts_child_start_failures_total{reason=\"exit\"}");
 
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..10 {
@@ -392,6 +405,18 @@ async fn r2_failed_start_shared_by_waiters() {
         metric("oxwhisper_tts_child_starts_total") - before,
         1.0,
         "10 waiters on one failed generation must cause exactly ONE spawn"
+    );
+    // Both counters are bumped before the waiters observe the error, so no
+    // wait is needed: the death is one start failure and no crash.
+    assert_eq!(
+        metric("oxwhisper_tts_child_start_failures_total{reason=\"exit\"}") - exits_before,
+        1.0,
+        "a child dying during startup is one start_failures{{reason=\"exit\"}}"
+    );
+    assert_eq!(
+        metric("oxwhisper_tts_child_restarts_total") - restarts_before,
+        0.0,
+        "a child that never became Ready must not count as a restart"
     );
     cleanup_markers(port);
 }
@@ -572,5 +597,86 @@ async fn r7_stop_sends_sigterm() {
         "a stop must deliver SIGTERM (marker {sigterm:?}) before any SIGKILL"
     );
     sup.shutdown().await;
+    cleanup_markers(port);
+}
+
+// ── R8: a child ignoring SIGTERM is SIGKILLed after the grace period ────
+// Mutation: delete `let _ = child.start_kill();` in stop_child -> RED (the
+// monitor waits on the child forever and the stop is never recorded).
+#[tokio::test]
+#[serial]
+async fn r8_ignored_sigterm_falls_back_to_sigkill() {
+    require_python3();
+    let port = free_port();
+    cleanup_markers(port);
+    std::fs::write(marker("crash", port), "").unwrap();
+    std::fs::write(marker("ignoreterm", port), "").unwrap();
+    let sup = Arc::new(TtsSupervisor::new(test_config(fake_bin(), port, 1, 10)));
+    let before = metric("oxwhisper_tts_child_stops_total{reason=\"idle\"}");
+    let _idle = sup.spawn_idle_loop(Duration::from_millis(100));
+
+    let (_url, guard) = sup.ensure_ready().await.expect("fake child should start");
+    drop(guard); // let the idle loop stop the child
+
+    // 1 s idle + 3 s TERM_GRACE, then SIGKILL and the reap.
+    assert!(
+        wait_metric(
+            "oxwhisper_tts_child_stops_total{reason=\"idle\"}",
+            before + 1.0,
+            Duration::from_secs(8),
+        )
+        .await,
+        "a child ignoring SIGTERM must be SIGKILLed and reaped after the grace period"
+    );
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "the killed child must have released port {port}"
+    );
+    sup.shutdown().await;
+    cleanup_markers(port);
+}
+
+// ── R9: shutdown keeps a leader that has not spawned yet from spawning ───
+// Mutation: delete the `if inner.shutting_down { return Err(..) }` check in
+// start_run's generation block -> RED (a child spawns after shutdown).
+#[tokio::test]
+#[serial]
+async fn r9_shutdown_before_spawn_spawns_nothing() {
+    require_python3();
+    let port = free_port();
+    cleanup_markers(port);
+    std::fs::write(marker("exit", port), "").unwrap();
+    let sup = Arc::new(TtsSupervisor::new(test_config(fake_bin(), port, 0, 10)));
+    // A failed start defers the next generation by the 1 s crash backoff.
+    assert!(
+        sup.ensure_ready().await.is_err(),
+        "the first start must fail"
+    );
+    std::fs::remove_file(marker("exit", port)).unwrap();
+    std::fs::write(marker("crash", port), "").unwrap();
+    let before = metric("oxwhisper_tts_child_starts_total");
+
+    let s = Arc::clone(&sup);
+    let caller = tokio::spawn(async move { s.ensure_ready().await });
+    tokio::time::sleep(Duration::from_millis(200)).await; // leader in backoff
+    sup.shutdown().await;
+
+    let res = tokio::time::timeout(Duration::from_secs(5), caller)
+        .await
+        .expect("the caller hung after shutdown")
+        .expect("ensure_ready task panicked");
+    assert!(
+        matches!(res, Err(TtsError::ShuttingDown)),
+        "a start pending at shutdown must give up, got {res:?}"
+    );
+    assert_eq!(
+        metric("oxwhisper_tts_child_starts_total") - before,
+        0.0,
+        "no child may be spawned after shutdown"
+    );
+    assert!(
+        matches!(sup.ensure_ready().await, Err(TtsError::ShuttingDown)),
+        "ensure_ready after shutdown must refuse to start"
+    );
     cleanup_markers(port);
 }

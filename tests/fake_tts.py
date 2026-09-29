@@ -21,6 +21,9 @@ vars or extra CLI args are needed (the supervisor owns the argv):
 SIGTERM writes oxw_fake_tts_sigterm_<port> then exits(0), so tests can tell
 a graceful stop from SIGKILL.
 
+  oxw_fake_tts_ignoreterm_<port> : if present -> SIGTERM is ignored (a child
+                                  wedged in shutdown; only SIGKILL stops it)
+
 Always writes this process's /proc/self/oom_score_adj to
 oxw_fake_tts_oom_<port> right after parsing args.
 """
@@ -58,7 +61,10 @@ def main() -> None:
         finally:
             os._exit(0)
 
-    signal.signal(signal.SIGTERM, on_sigterm)
+    if os.path.exists(marker("ignoreterm", a.port)):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    else:
+        signal.signal(signal.SIGTERM, on_sigterm)
 
     try:
         with open("/proc/self/oom_score_adj") as f:

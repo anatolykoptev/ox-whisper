@@ -21,6 +21,15 @@ metrics-exporter-prometheus = { version = "0.17", default-features = false }
 tokio-stream = "0.1"
 futures-core = "0.3"
 strsim = "0.11"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+serial_test = "3"
 
 [profile.release]
 opt-level = 3

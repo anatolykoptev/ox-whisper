@@ -80,6 +80,20 @@ impl Models {
             eviction_handles,
         }
     }
+
+    /// Empty `Models` for tests that exercise HTTP handlers without loading
+    /// real model files.
+    #[cfg(test)]
+    pub fn empty() -> Self {
+        Self {
+            en: None,
+            ru: None,
+            vad: None,
+            punct: None,
+            diarize: None,
+            eviction_handles: Vec::new(),
+        }
+    }
 }
 
 fn load_moonshine(config: &Config) -> Option<std::sync::Arc<EvictablePool<MoonshineRecognizer>>> {

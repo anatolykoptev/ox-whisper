@@ -37,5 +37,5 @@ docker compose build --no-cache ox-whisper && docker compose up -d --no-deps --f
 ## Gotchas
 
 - **aarch64 only** — sherpa-onnx `.so` libs are pre-compiled for ARM64
-- CI uses Docker buildx with QEMU (no native clippy — native deps)
+- CI runs natively on `ubuntu-24.04-arm`: `cargo nextest` plus a full `docker buildx` image build
 - ffmpeg required in container for audio format conversion

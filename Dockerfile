@@ -62,11 +62,66 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/release/ox-whisper /binary && \
     test "$(stat -c %s /binary)" -gt 1000000 || (echo "ERROR: binary too small ($(stat -c %s /binary) bytes), build did not link"; exit 1)
 
-# Stage 4: Runtime
-FROM debian:bookworm-slim
+# Stage 4: qwentts-build — upstream tts-server (ServeurpersoCom/qwentts.cpp),
+# pinned commit; ox-whisper spawns it as a child process at /opt/qwentts/tts-server.
+# Debian 13: GGML_CPU_ALL_VARIANTS always builds the armv9.2 SME variants,
+# which need GCC 14 (bookworm ships GCC 12).
+FROM debian:trixie-slim AS qwentts-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates cmake g++ make && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG QWENTTS_COMMIT=6fae92914045cd83364d2845ceaa0f7969727319
+ARG QWENTTS_GGML_COMMIT=40e16e4a814f7fe851a0c486fb9e8c722e957830
+
+WORKDIR /src
+RUN git clone https://github.com/ServeurpersoCom/qwentts.cpp qwentts && \
+    cd qwentts && \
+    git checkout -q "$QWENTTS_COMMIT" && \
+    git submodule update --init --recursive && \
+    test "$(git -C ggml rev-parse HEAD)" = "$QWENTTS_GGML_COMMIT"
+
+# QT_N_THREADS env override: upstream divides hardware_concurrency() by 2 for
+# SMT/HT, which halves throughput on SMT-less ARM cores (Ampere/Neoverse).
+COPY patches/qwentts-threads.patch /tmp/qwentts-threads.patch
+RUN git -C qwentts apply /tmp/qwentts-threads.patch
+
+# Portable aarch64 build:
+#   GGML_NATIVE=OFF        — no -mcpu=native; the image runs on any aarch64.
+#   GGML_BACKEND_DL=ON     — CPU backends built as runtime-loaded modules
+#                            (libggml-cpu-*.so), scored against host CPUID.
+#   GGML_CPU_ALL_VARIANTS  — one module per ARM ISA level (armv8.0 → armv9.2),
+#                            incl. a baseline for cores without dotprod.
+#   BUILD_SHARED_LIBS=ON   — required by GGML_BACKEND_DL (ggml FATAL_ERRORs).
+#   GGML_LLAMAFILE=ON      — sgemm fast path.
+# Backend modules are dependencies of the ggml target, so building tts-server
+# alone produces every libggml*.so needed at runtime.
+RUN cmake -S qwentts -B qwentts/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DGGML_NATIVE=OFF \
+        -DGGML_BACKEND_DL=ON \
+        -DGGML_CPU_ALL_VARIANTS=ON \
+        -DGGML_LLAMAFILE=ON && \
+    cmake --build qwentts/build --target tts-server -j"$(nproc)" && \
+    mkdir -p /opt/qwentts /usr/share/licenses/qwentts && \
+    cp qwentts/build/tts-server /opt/qwentts/ && \
+    cp -a qwentts/build/libggml*.so* /opt/qwentts/ && \
+    test -x /opt/qwentts/tts-server && \
+    ls /opt/qwentts/libggml-cpu-*.so* >/dev/null && \
+    strip /opt/qwentts/tts-server && \
+    find /opt/qwentts -type f -name 'libggml*.so*' -exec strip --strip-unneeded {} + && \
+    cp qwentts/LICENSE /usr/share/licenses/qwentts/qwentts.cpp.LICENSE && \
+    cp qwentts/ggml/LICENSE /usr/share/licenses/qwentts/ggml.LICENSE && \
+    cp qwentts/vendor/cpp-httplib/LICENSE /usr/share/licenses/qwentts/cpp-httplib.LICENSE && \
+    sed -n '1,\|\*/|p' qwentts/vendor/yyjson/yyjson.h > /usr/share/licenses/qwentts/yyjson.LICENSE
+
+# Stage 5: Runtime
+# Same release as qwentts-build: tts-server links against its glibc.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates ffmpeg curl && \
+    ca-certificates ffmpeg curl libatomic1 libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
 # sherpa-onnx shared libraries from vendor
@@ -74,6 +129,17 @@ COPY vendor/sherpa-onnx/lib/libsherpa-onnx-c-api.so /usr/lib/
 COPY vendor/sherpa-onnx/lib/libsherpa-onnx-cxx-api.so /usr/lib/
 COPY vendor/sherpa-onnx/lib/libonnxruntime.so /usr/lib/
 RUN ldconfig
+
+# qwentts TTS server — spawned by ox-whisper as a child process. All
+# libggml*.so must sit next to the executable: ggml_backend_load_best()
+# scans the executable's directory (/proc/self/exe) for libggml-cpu-*.so
+# modules and dlopen's the best-matching ARM ISA variant at startup.
+# The ld.so.conf.d entry lets the same dir resolve the binary's link-time
+# deps (libggml.so.0, libggml-base.so.0) without LD_LIBRARY_PATH.
+COPY --from=qwentts-build /opt/qwentts/ /opt/qwentts/
+COPY --from=qwentts-build /usr/share/licenses/qwentts/ /usr/share/licenses/qwentts/
+RUN echo "/opt/qwentts" > /etc/ld.so.conf.d/qwentts.conf && ldconfig && \
+    if ldd /opt/qwentts/tts-server | grep "not found"; then exit 1; fi
 
 COPY --from=builder /binary /usr/local/bin/ox-whisper
 

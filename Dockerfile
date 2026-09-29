@@ -64,7 +64,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # Stage 4: qwentts-build — upstream tts-server (ServeurpersoCom/qwentts.cpp),
 # pinned commit; ox-whisper spawns it as a child process at /opt/qwentts/tts-server.
-FROM debian:bookworm-slim AS qwentts-build
+# Debian 13: GGML_CPU_ALL_VARIANTS always builds the armv9.2 SME variants,
+# which need GCC 14 (bookworm ships GCC 12).
+FROM debian:trixie-slim AS qwentts-build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates cmake g++ make && \
     rm -rf /var/lib/apt/lists/*
@@ -115,7 +117,8 @@ RUN cmake -S qwentts -B qwentts/build \
     sed -n '1,\|\*/|p' qwentts/vendor/yyjson/yyjson.h > /usr/share/licenses/qwentts/yyjson.LICENSE
 
 # Stage 5: Runtime
-FROM debian:bookworm-slim
+# Same release as qwentts-build: tts-server links against its glibc.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates ffmpeg curl libatomic1 libgomp1 && \

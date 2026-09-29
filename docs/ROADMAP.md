@@ -43,7 +43,7 @@ DX-улучшения от конкурентов + исправление ба�
 - [x] Paragraphs — авто-разбивка по паузам (>1.5s), speaker change, длине (7 тестов)
 - [x] `custom_spelling` — пользовательские замены слов с поддержкой пунктуации (7 тестов)
 - [x] Word timestamps fallback — proportional estimation для Moonshine v2 (нет нативных timestamps)
-- [x] GitHub Actions release workflow — Docker buildx + QEMU aarch64, auto-changelog, GitHub Release
+- [x] GitHub Actions release workflow — Docker buildx на нативном aarch64 runner, auto-changelog, GitHub Release
 - [ ] GigaAM v3 RNNT — код готов, нужно подключить модель в Docker
 - [ ] Бенчмарки WER на Golos/CommonVoice
 - [ ] Diarization models в Docker — segmentation.onnx / embedding.onnx не подключены

@@ -75,7 +75,7 @@ ARG QWENTTS_COMMIT=6fae92914045cd83364d2845ceaa0f7969727319
 ARG QWENTTS_GGML_COMMIT=40e16e4a814f7fe851a0c486fb9e8c722e957830
 
 WORKDIR /src
-RUN git clone --recurse-submodules https://github.com/ServeurpersoCom/qwentts.cpp qwentts && \
+RUN git clone https://github.com/ServeurpersoCom/qwentts.cpp qwentts && \
     cd qwentts && \
     git checkout -q "$QWENTTS_COMMIT" && \
     git submodule update --init --recursive && \
@@ -138,7 +138,8 @@ RUN ldconfig
 # deps (libggml.so.0, libggml-base.so.0) without LD_LIBRARY_PATH.
 COPY --from=qwentts-build /opt/qwentts/ /opt/qwentts/
 COPY --from=qwentts-build /usr/share/licenses/qwentts/ /usr/share/licenses/qwentts/
-RUN echo "/opt/qwentts" > /etc/ld.so.conf.d/qwentts.conf && ldconfig
+RUN echo "/opt/qwentts" > /etc/ld.so.conf.d/qwentts.conf && ldconfig && \
+    if ldd /opt/qwentts/tts-server | grep "not found"; then exit 1; fi
 
 COPY --from=builder /binary /usr/local/bin/ox-whisper
 

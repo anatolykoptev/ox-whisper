@@ -7,7 +7,10 @@
 //!
 //! - lazy start: nothing spawns at boot; the first [`ensure_ready`] starts the
 //!   child and waits for `GET /health` to answer 200
-//! - single-flight: concurrent callers share one start, never two children
+//! - single-flight: each start runs in a spawned leader task that owns every
+//!   transition of its generation (drain, backoff, spawn, probe, commit);
+//!   callers only subscribe to its shared outcome, so a dropped caller can
+//!   never abort a start and concurrent callers share one child
 //! - idle stop: a background loop stops the child after `idle_stop_secs` with
 //!   no in-flight [`TtsGuard`] (0 = never)
 //! - crash handling: an unrequested exit flips state to `Crashed`; the next
@@ -40,8 +43,10 @@ use crate::metrics::names;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TtsState {
-    /// No child is managed (external `TTS_UPSTREAM_URL` configured, or TTS off).
+    /// No child is managed because TTS is off (no supervisor exists).
     Disabled,
+    /// An external `TTS_UPSTREAM_URL` is configured — no child is managed.
+    External,
     /// No child process is running.
     Stopped,
     /// Child spawned, waiting for `/health` to answer 200.
@@ -52,28 +57,41 @@ pub enum TtsState {
     Crashed,
 }
 
-/// Errors returned by [`TtsSupervisor::ensure_ready`].
-#[derive(Debug, thiserror::Error)]
+/// Errors returned by [`TtsSupervisor::ensure_ready`]. Cloneable so every
+/// waiter of one start generation observes the same error.
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum TtsError {
     /// `TTS_ENABLED` is false — the supervisor is not supposed to run a child.
     #[error("tts is disabled")]
     Disabled,
     /// The `tts-server` binary could not be spawned.
     #[error("tts child spawn failed: {0}")]
-    Spawn(#[source] io::Error),
+    Spawn(String),
     /// The child exited before answering `/health` with 200.
     #[error("tts child exited before becoming healthy: {0}")]
     StartupExit(String),
     /// `/health` did not answer 200 within `startup_timeout_secs`.
     #[error("tts child did not answer /health within {0}s")]
     StartupTimeout(u64),
+    /// `TTS_PORT` is already bound by another process — `/health` answers
+    /// would be a foreign listener's, never ours.
+    #[error("tts port {0} is already bound by another process")]
+    PortBusy(u16),
+    /// The previous child ignored its stop request past the drain deadline.
+    #[error("previous child still running")]
+    DrainTimeout,
+    /// The leader task owning the start died before publishing an outcome.
+    #[error("tts start leader exited without an outcome")]
+    StartAborted,
 }
 
 /// Why a running child was asked to stop. Feeds `stops_total{reason}`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopReason {
     Idle,
     Shutdown,
+    /// The child never answered `/health` within `startup_timeout_secs`.
+    StartupTimeout,
 }
 
 impl StopReason {
@@ -81,6 +99,7 @@ impl StopReason {
         match self {
             Self::Idle => "idle",
             Self::Shutdown => "shutdown",
+            Self::StartupTimeout => "startup_timeout",
         }
     }
 }
@@ -108,6 +127,9 @@ struct Inner {
     backoff: Duration,
     /// Earliest instant a restart is allowed after a crash.
     retry_after: Option<Instant>,
+    /// Receiver of the in-flight start generation's shared outcome. `Some`
+    /// iff a leader task currently owns a start; callers join by cloning it.
+    start_rx: Option<watch::Receiver<StartOutcome>>,
 }
 
 impl Inner {
@@ -123,16 +145,19 @@ impl Inner {
             ready_since: None,
             backoff: Duration::ZERO,
             retry_after: None,
+            start_rx: None,
         }
     }
 }
+
+/// The single outcome of one start generation — `None` until the leader
+/// publishes. Shared with every waiter through `Inner::start_rx`.
+type StartOutcome = Option<Result<String, TtsError>>;
 
 /// Process supervisor for the TTS child. One per process; lives in `AppState`.
 pub struct TtsSupervisor {
     cfg: TtsConfig,
     inner: Mutex<Inner>,
-    /// Single-flight: serializes start attempts so one start is shared.
-    start_lock: tokio::sync::Mutex<()>,
     http: Client<HttpConnector, Empty<Bytes>>,
 }
 
@@ -140,16 +165,32 @@ const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
 const HEALTH_POLL: Duration = Duration::from_millis(100);
+/// Bound on a single `/health` probe — a listener that accepts but never
+/// answers must not park the start loop.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Grace period between SIGTERM and SIGKILL when stopping the child.
+const TERM_GRACE: Duration = Duration::from_secs(3);
 const STOP_WAIT: Duration = Duration::from_secs(5);
+/// Upper bound on [`TtsSupervisor::shutdown`] waiting for the reap.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
 impl TtsSupervisor {
     pub fn new(cfg: TtsConfig) -> Self {
         let http = Client::builder(TokioExecutor::new()).build(HttpConnector::new());
+        // Pre-register every counter and label value at 0 so `increase`-style
+        // alerts observe the first event instead of a missing series.
         metrics::gauge!(names::TTS_CHILD_UP).set(0);
+        metrics::counter!(names::TTS_CHILD_STARTS).increment(0);
+        metrics::counter!(names::TTS_CHILD_RESTARTS).increment(0);
+        for reason in ["idle", "shutdown", "startup_timeout"] {
+            metrics::counter!(names::TTS_CHILD_STOPS, "reason" => reason).increment(0);
+        }
+        for reason in ["spawn", "exit", "timeout", "port_busy"] {
+            metrics::counter!(names::TTS_CHILD_START_FAILURES, "reason" => reason).increment(0);
+        }
         Self {
             cfg,
             inner: Mutex::new(Inner::new()),
-            start_lock: tokio::sync::Mutex::new(()),
             http,
         }
     }
@@ -158,11 +199,11 @@ impl TtsSupervisor {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Current lifecycle state. `Disabled` when an external upstream is
+    /// Current lifecycle state. `External` when an upstream URL is
     /// configured (no child is ever managed).
     pub fn state(&self) -> TtsState {
         if self.cfg.upstream_url.is_some() {
-            TtsState::Disabled
+            TtsState::External
         } else {
             self.inner().state
         }
@@ -184,93 +225,137 @@ impl TtsSupervisor {
         }
     }
 
-    /// Ensure a TTS endpoint is reachable and return its base URL.
+    /// Ensure a TTS endpoint is reachable and return its base URL plus a
+    /// request guard that keeps the child alive.
     ///
-    /// With `TTS_UPSTREAM_URL` set this just returns that URL and never spawns.
-    /// Otherwise starts the child if needed and waits for `/health` to answer
-    /// 200 (bounded by `startup_timeout_secs`). Concurrent callers share one
-    /// start via `start_lock`; a crashed child is restarted after backoff.
-    pub async fn ensure_ready(self: &Arc<Self>) -> Result<String, TtsError> {
+    /// With `TTS_UPSTREAM_URL` set this just returns that URL and never
+    /// spawns. Otherwise each start runs in a spawned leader task that owns
+    /// every transition of its generation — drain of the previous child,
+    /// crash backoff, the port check, spawn and the `/health` probe loop —
+    /// and publishes one shared outcome on `Inner::start_rx`. Callers only
+    /// subscribe: a dropped caller can never abort a start, and every waiter
+    /// of a generation observes the same `Ok(url)` or the same error. The
+    /// returned guard is taken under the same lock that observed `Ready`, so
+    /// an idle stop can never slip between readiness and the guard.
+    pub async fn ensure_ready(self: &Arc<Self>) -> Result<(String, TtsGuard), TtsError> {
         if !self.cfg.enabled {
             return Err(TtsError::Disabled);
         }
         if let Some(url) = &self.cfg.upstream_url {
-            return Ok(url.clone());
+            return Ok((url.clone(), self.guard()));
         }
-        {
-            let mut inner = self.inner();
-            if inner.state == TtsState::Ready {
-                inner.last_activity = Instant::now();
-                return Ok(self.base_url());
-            }
-        }
-
-        let _permit = self.start_lock.lock().await;
-
-        // If a child is still up or a stop is in flight, wait for it to be
-        // fully reaped before spawning a new one on the same port. `child_gone`
-        // is cleared by `on_child_exit` once the monitor has reaped; request a
-        // stop first when the monitor has not been asked yet. Bounded by a
-        // deadline — a wedged child must not hang the caller forever.
-        let drain_deadline = Instant::now() + STOP_WAIT;
         loop {
-            let pending = {
+            // Join the in-flight generation or launch a new leader task for
+            // it. `start_rx.is_some()` is the single-flight token: exactly one
+            // leader exists per generation and it is never cancelled here.
+            let mut rx = {
                 let mut inner = self.inner();
-                match inner.state {
-                    TtsState::Disabled => return Err(TtsError::Disabled),
-                    TtsState::Ready => {
-                        inner.last_activity = Instant::now();
-                        return Ok(self.base_url());
-                    }
-                    _ => {}
+                if let Some(ready) = Self::ready_locked(&mut inner, self) {
+                    return Ok(ready);
                 }
-                match inner.child_gone.clone() {
-                    Some(gone) => {
-                        let tx = inner.stop_tx.take();
-                        if tx.is_some() && inner.stop_reason.is_none() {
-                            inner.stop_reason = Some(StopReason::Shutdown);
-                        }
-                        Some((tx, gone))
+                match inner.start_rx.clone() {
+                    Some(rx) => rx,
+                    None => {
+                        let (tx, rx) = watch::channel::<StartOutcome>(None);
+                        inner.start_rx = Some(rx.clone());
+                        let sup = Arc::clone(self);
+                        tokio::spawn(async move {
+                            // Clears `start_rx` on ANY exit — published
+                            // outcome, failure or panic — so later callers can
+                            // start a new generation and a dead leader cannot
+                            // wedge the supervisor in `Starting`.
+                            let _cleanup = StartCleanup {
+                                sup: Arc::clone(&sup),
+                            };
+                            let outcome = sup.start_run().await;
+                            let _ = tx.send(Some(outcome));
+                        });
+                        rx
                     }
-                    None => None,
                 }
-            }; // MutexGuard drops here — before any await.
-            match pending {
-                Some((tx, gone)) => {
-                    if let Some(tx) = tx {
-                        let _ = tx.send(());
-                    }
-                    let now = Instant::now();
-                    if now >= drain_deadline {
-                        break;
-                    }
-                    let _ = tokio::time::timeout(
-                        drain_deadline.saturating_duration_since(now),
-                        gone.notified(),
-                    )
-                    .await;
+            };
+
+            // Wait for the leader to publish this generation's outcome. The
+            // sender lives in the leader task; if it dies without publishing,
+            // `changed` errors and the waiter bails out with StartAborted.
+            let outcome = loop {
+                if let Some(out) = &*rx.borrow() {
+                    break out.clone();
                 }
-                None => break,
+                if rx.changed().await.is_err() {
+                    break Err(TtsError::StartAborted);
+                }
+            };
+            match outcome {
+                Err(e) => return Err(e),
+                Ok(_) => {
+                    // Re-observe `Ready` under the lock that takes the guard:
+                    // the leader published success but an idle stop may have
+                    // raced us — then the child is on its way down and its URL
+                    // must not be handed out. Re-loop to join the next start.
+                    let mut inner = self.inner();
+                    match Self::ready_locked(&mut inner, self) {
+                        Some(ready) => return Ok(ready),
+                        None => continue,
+                    }
+                }
             }
         }
+    }
 
-        // Crash backoff: the previous unrequested exit defers the next start.
+    /// If the child is `Ready`, take a request guard under the same lock and
+    /// return the base URL with it. `None` when not ready.
+    fn ready_locked(inner: &mut Inner, sup: &Arc<Self>) -> Option<(String, TtsGuard)> {
+        if inner.state != TtsState::Ready {
+            return None;
+        }
+        inner.in_flight += 1;
+        inner.last_activity = Instant::now();
+        Some((
+            sup.base_url(),
+            TtsGuard {
+                sup: Arc::clone(sup),
+            },
+        ))
+    }
+
+    /// The start leader's body: owns every transition of one start
+    /// generation — drain, backoff, port check, spawn, probe, commit. Runs
+    /// detached inside the spawned task, so it is never cancelled by callers.
+    /// On success the child is `Ready`; on failure the state is `Stopped` or
+    /// `Crashed` and `retry_after` defers the next generation.
+    async fn start_run(self: &Arc<Self>) -> Result<String, TtsError> {
+        // A previous child may still be reaping — wait for it before binding
+        // the port again. A wedged child fails the whole generation.
+        if let Err(e) = self.drain_child().await {
+            self.bump_backoff();
+            return Err(self.fail_start(None, e));
+        }
+
+        // Crash backoff: the previous failure defers this start.
         let delay = self
             .inner()
             .retry_after
             .map(|t| t.saturating_duration_since(Instant::now()))
             .unwrap_or_default();
         if !delay.is_zero() {
-            tracing::info!(?delay, "tts child restart deferred by crash backoff");
+            tracing::info!(?delay, "tts child start deferred by backoff");
             tokio::time::sleep(delay).await;
+        }
+
+        // The port must be free before spawn — otherwise `/health` answers
+        // could come from a foreign listener and get committed as ours.
+        if std::net::TcpListener::bind(("127.0.0.1", self.cfg.port)).is_err() {
+            self.bump_backoff();
+            return Err(self.fail_start(Some("port_busy"), TtsError::PortBusy(self.cfg.port)));
         }
 
         let generation = {
             let mut inner = self.inner();
             inner.state = TtsState::Starting;
             inner.generation += 1;
-            // Fresh generation must not inherit a stop request recorded for
-            // the previous child (drain deadline can leave one behind).
+            // A fresh generation must not inherit a stop request recorded for
+            // the previous child.
             inner.stop_reason = None;
             inner.generation
         };
@@ -280,7 +365,8 @@ impl TtsSupervisor {
             Ok(child) => child,
             Err(e) => {
                 self.inner().state = TtsState::Stopped;
-                return Err(e);
+                self.bump_backoff();
+                return Err(self.fail_start(Some("spawn"), e));
             }
         };
         let gone = Arc::new(Notify::new());
@@ -311,31 +397,102 @@ impl TtsSupervisor {
                 } else {
                     // The monitor beat us to a transition (e.g. the child died
                     // right after a successful probe).
-                    Err(TtsError::StartupExit(
-                        "child exited during startup".to_string(),
+                    Err(self.fail_start(
+                        Some("exit"),
+                        TtsError::StartupExit("child exited during startup".to_string()),
                     ))
                 }
             }
-            Err(e) => {
+            Err(TtsError::StartupTimeout(secs)) => {
                 let mut inner = self.inner();
                 if inner.state == TtsState::Starting && inner.generation == generation {
-                    // Timeout: abort the spawn — request a shutdown stop so the
-                    // child cannot linger without supervision.
+                    // Abort the spawn — request a stop so the child cannot
+                    // linger without supervision. `on_child_exit` counts the
+                    // stop as `startup_timeout` and applies the crash backoff.
                     inner.state = TtsState::Stopped;
-                    inner.stop_reason = Some(StopReason::Shutdown);
+                    inner.stop_reason = Some(StopReason::StartupTimeout);
                     if let Some(tx) = inner.stop_tx.take() {
                         let _ = tx.send(());
                     }
                 }
-                Err(e)
+                Err(self.fail_start(Some("timeout"), TtsError::StartupTimeout(secs)))
+            }
+            Err(e) => {
+                // The child exited mid-start: `on_child_exit` already recorded
+                // the `Crashed` state and the backoff.
+                Err(self.fail_start(Some("exit"), e))
             }
         }
     }
 
-    /// Ask for the running child to be stopped (e.g. server shutdown).
-    /// Non-blocking: the monitor kills and reaps the child asynchronously.
-    pub fn shutdown(&self) {
-        self.request_stop(StopReason::Shutdown);
+    /// Wait for the previous child to be reaped before a new spawn binds the
+    /// port, requesting its stop if the monitor has not been asked yet.
+    /// Bounded by `STOP_WAIT` — a wedged child must not hang the start.
+    async fn drain_child(&self) -> Result<(), TtsError> {
+        let deadline = Instant::now() + STOP_WAIT;
+        loop {
+            let pending = {
+                let mut inner = self.inner();
+                match inner.child_gone.clone() {
+                    Some(gone) => {
+                        let tx = inner.stop_tx.take();
+                        if tx.is_some() && inner.stop_reason.is_none() {
+                            inner.stop_reason = Some(StopReason::Shutdown);
+                        }
+                        Some((tx, gone))
+                    }
+                    None => None,
+                }
+            }; // MutexGuard drops here — before any await.
+            match pending {
+                Some((tx, gone)) => {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(());
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(TtsError::DrainTimeout);
+                    }
+                    let _ = tokio::time::timeout(
+                        deadline.saturating_duration_since(now),
+                        gone.notified(),
+                    )
+                    .await;
+                }
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// Move the crash backoff one step up and defer the next start.
+    fn bump_backoff(&self) {
+        let mut inner = self.inner();
+        inner.backoff = next_backoff(inner.backoff, None);
+        inner.retry_after = Some(Instant::now() + inner.backoff);
+    }
+
+    /// Record one start failure — the labelled counter plus an error log —
+    /// and return the error unchanged for publishing.
+    fn fail_start(&self, reason: Option<&'static str>, err: TtsError) -> TtsError {
+        if let Some(reason) = reason {
+            metrics::counter!(names::TTS_CHILD_START_FAILURES, "reason" => reason).increment(1);
+        }
+        tracing::error!(reason = reason.unwrap_or("drain"), error = %err, "tts child start failed");
+        err
+    }
+
+    /// Ask for the running child to be stopped and wait until it is reaped
+    /// (bounded by `SHUTDOWN_WAIT` so a wedged child cannot hang the exit).
+    /// Called from `main`'s graceful-shutdown path so `docker stop` stops the
+    /// child via SIGTERM instead of timing out into SIGKILL.
+    pub async fn shutdown(&self) {
+        let gone = {
+            self.request_stop(StopReason::Shutdown);
+            self.inner().child_gone.clone()
+        };
+        if let Some(gone) = gone {
+            let _ = tokio::time::timeout(SHUTDOWN_WAIT, gone.notified()).await;
+        }
     }
 
     /// Request a stop of the current child, if any is running.
@@ -381,16 +538,16 @@ impl TtsSupervisor {
         let mut child = tokio::process::Command::from(cmd)
             .kill_on_drop(true)
             .spawn()
-            .map_err(TtsError::Spawn)?;
+            .map_err(|e| TtsError::Spawn(e.to_string()))?;
         metrics::counter!(names::TTS_CHILD_STARTS).increment(1);
         tracing::info!(bin = %self.cfg.bin, port = self.cfg.port, "tts child spawned");
         // Pipe the child's output into `tts_child` tracing. Detached: the
         // tasks end by themselves when the pipes close at child exit.
         if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(forward_output(stdout, false));
+            tokio::spawn(forward_output(stdout, "stdout"));
         }
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(forward_output(stderr, true));
+            tokio::spawn(forward_output(stderr, "stderr"));
         }
         Ok(child)
     }
@@ -408,9 +565,9 @@ impl TtsSupervisor {
             res = child.wait() => res,
             _ = stop_rx.changed() => {
                 // Stop requested, or the sender was dropped with the
-                // supervisor. Kill and reap — never leave a zombie.
-                let _ = child.start_kill();
-                child.wait().await
+                // supervisor. SIGTERM first — tts-server traps it into a
+                // graceful svr.stop() — SIGKILL only after TERM_GRACE.
+                stop_child(&mut child).await
             }
         };
         if let Some(sup) = sup.upgrade() {
@@ -435,32 +592,47 @@ impl TtsSupervisor {
                 inner.state = TtsState::Stopped;
                 metrics::gauge!(names::TTS_CHILD_UP).set(0);
                 metrics::counter!(names::TTS_CHILD_STOPS, "reason" => reason.as_str()).increment(1);
+                if reason == StopReason::StartupTimeout {
+                    // A child that never became healthy counts as a failed
+                    // start: defer the next one like a crash would.
+                    inner.backoff = next_backoff(inner.backoff, None);
+                    inner.retry_after = Some(Instant::now() + inner.backoff);
+                } else if healthy_for.is_some_and(|d| d >= BACKOFF_RESET_AFTER) {
+                    // A long-healthy child proves the backoff cause is gone —
+                    // decay it so the next start is not deferred by a stale
+                    // failure.
+                    inner.backoff = Duration::ZERO;
+                    inner.retry_after = None;
+                }
                 tracing::info!(reason = reason.as_str(), ?result, "tts child stopped");
             }
             None => {
                 inner.state = TtsState::Crashed;
                 metrics::gauge!(names::TTS_CHILD_UP).set(0);
                 metrics::counter!(names::TTS_CHILD_RESTARTS).increment(1);
-                let backoff = if inner.backoff.is_zero()
-                    || healthy_for.is_some_and(|d| d >= BACKOFF_RESET_AFTER)
-                {
-                    BACKOFF_INITIAL
-                } else {
-                    (inner.backoff * 2).min(BACKOFF_MAX)
-                };
-                inner.backoff = backoff;
-                inner.retry_after = Some(Instant::now() + backoff);
-                tracing::warn!(?result, ?backoff, "tts child exited unexpectedly");
+                inner.backoff = next_backoff(inner.backoff, healthy_for);
+                inner.retry_after = Some(Instant::now() + inner.backoff);
+                tracing::warn!(?result, backoff = ?inner.backoff, "tts child exited unexpectedly");
             }
         }
     }
 
     /// Poll `GET /health` until 200, the child exits, or the startup timeout.
+    /// Each probe is bounded by `min(remaining, PROBE_TIMEOUT)` — a listener
+    /// that accepts but never answers must not park the start loop forever.
     async fn wait_ready(&self, generation: u64) -> Result<(), TtsError> {
         let timeout = Duration::from_secs(self.cfg.startup_timeout_secs);
         let deadline = Instant::now() + timeout;
         loop {
-            if self.probe_health().await {
+            let now = Instant::now();
+            let remaining = deadline.saturating_duration_since(now);
+            if remaining.is_zero() {
+                return Err(TtsError::StartupTimeout(self.cfg.startup_timeout_secs));
+            }
+            if tokio::time::timeout(remaining.min(PROBE_TIMEOUT), self.probe_health())
+                .await
+                .unwrap_or(false)
+            {
                 return Ok(());
             }
             {
@@ -556,6 +728,12 @@ pub struct TtsGuard {
     sup: Arc<TtsSupervisor>,
 }
 
+impl std::fmt::Debug for TtsGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TtsGuard").finish_non_exhaustive()
+    }
+}
+
 impl Drop for TtsGuard {
     fn drop(&mut self) {
         let mut inner = self.sup.inner();
@@ -565,23 +743,77 @@ impl Drop for TtsGuard {
 }
 
 /// Forward one child output stream into `tracing` under the `tts_child`
-/// target; stderr is logged at warn level, stdout at info.
-async fn forward_output<R: tokio::io::AsyncRead + Unpin>(reader: R, is_err: bool) {
+/// target. Lines log at INFO, raised to WARN only for lines reporting an
+/// error (`FATAL` or `ERROR`).
+async fn forward_output<R: tokio::io::AsyncRead + Unpin>(reader: R, stream: &'static str) {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(reader).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
-                if is_err {
-                    tracing::warn!(target: "tts_child", "{line}");
+                if line.contains("FATAL") || line.contains("ERROR") {
+                    tracing::warn!(target: "tts_child", stream, "{line}");
                 } else {
-                    tracing::info!(target: "tts_child", "{line}");
+                    tracing::info!(target: "tts_child", stream, "{line}");
                 }
             }
             Ok(None) => break,
             Err(e) => {
-                tracing::warn!(target: "tts_child", "output read error: {e}");
+                tracing::warn!(target: "tts_child", stream, "output read error: {e}");
                 break;
+            }
+        }
+    }
+}
+
+/// Terminate a child: SIGTERM first so tts-server can shut down gracefully
+/// (`svr.stop()`), then SIGKILL after `TERM_GRACE`. Always leaves the child
+/// reaped — never a zombie.
+async fn stop_child(child: &mut Child) -> io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = child.id() {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    match tokio::time::timeout(TERM_GRACE, child.wait()).await {
+        Ok(res) => res,
+        Err(_) => {
+            let _ = child.start_kill();
+            child.wait().await
+        }
+    }
+}
+
+/// Crash backoff step: 1 s doubling to 30 s. `healthy_for` at least
+/// `BACKOFF_RESET_AFTER` proves the failure cause is gone and resets it.
+fn next_backoff(current: Duration, healthy_for: Option<Duration>) -> Duration {
+    if current.is_zero() || healthy_for.is_some_and(|d| d >= BACKOFF_RESET_AFTER) {
+        BACKOFF_INITIAL
+    } else {
+        (current * 2).min(BACKOFF_MAX)
+    }
+}
+
+/// Clears `Inner::start_rx` when the start leader exits for any reason —
+/// published outcome, failure or panic — so later callers can launch a new
+/// generation. If the leader died mid-start it also requests the child's
+/// stop so nothing lingers unsupervised.
+struct StartCleanup {
+    sup: Arc<TtsSupervisor>,
+}
+
+impl Drop for StartCleanup {
+    fn drop(&mut self) {
+        let mut inner = self.sup.inner();
+        inner.start_rx = None;
+        if inner.state == TtsState::Starting {
+            inner.state = TtsState::Stopped;
+            if inner.stop_reason.is_none() {
+                inner.stop_reason = Some(StopReason::Shutdown);
+            }
+            if let Some(tx) = inner.stop_tx.take() {
+                let _ = tx.send(());
             }
         }
     }

@@ -29,6 +29,8 @@ pub mod names {
     pub const TTS_CHILD_RESTARTS: &str = "oxwhisper_tts_child_restarts_total";
     #[cfg_attr(not(test), allow(dead_code))]
     pub const TTS_CHILD_STOPS: &str = "oxwhisper_tts_child_stops_total";
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const TTS_CHILD_START_FAILURES: &str = "oxwhisper_tts_child_start_failures_total";
 }
 
 pub fn install_recorder() -> PrometheusHandle {

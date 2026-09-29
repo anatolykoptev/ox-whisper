@@ -7,6 +7,10 @@ Accepts the same CLI shape as the real tts-server (--model, --codec,
 Variants are driven by marker files in $TMPDIR keyed by port, so no env
 vars or extra CLI args are needed (the supervisor owns the argv):
 
+  oxw_fake_tts_exit_<port>   : if present -> print an error and exit(3)
+                              immediately (start failure)
+  oxw_fake_tts_hang_<port>   : if present -> bind and accept connections but
+                              never answer (a wedged listener)
   oxw_fake_tts_crash_<port>  : if ABSENT -> create it, serve /health, then
                               exit(42) after CRASH_AFTER_S seconds (a crash
                               that only happens once per marker lifecycle);
@@ -14,12 +18,17 @@ vars or extra CLI args are needed (the supervisor owns the argv):
   oxw_fake_tts_delay_<port>  : if present -> sleep contents-as-ms before
                               binding the socket (slow model load)
 
+SIGTERM writes oxw_fake_tts_sigterm_<port> then exits(0), so tests can tell
+a graceful stop from SIGKILL.
+
 Always writes this process's /proc/self/oom_score_adj to
 oxw_fake_tts_oom_<port> right after parsing args.
 """
 
 import argparse
 import os
+import signal
+import socket
 import sys
 import tempfile
 import threading
@@ -42,6 +51,15 @@ def main() -> None:
     p.add_argument("--max-batch", default="2")
     a = p.parse_args()
 
+    def on_sigterm(signum, frame):
+        try:
+            with open(marker("sigterm", a.port), "w") as f:
+                f.write("term")
+        finally:
+            os._exit(0)
+
+    signal.signal(signal.SIGTERM, on_sigterm)
+
     try:
         with open("/proc/self/oom_score_adj") as f:
             adj = f.read().strip()
@@ -49,6 +67,22 @@ def main() -> None:
             f.write(adj)
     except OSError as e:
         print(f"fake_tts: cannot record oom_score_adj: {e}", file=sys.stderr)
+
+    if os.path.exists(marker("exit", a.port)):
+        print("fake_tts: ERROR bad model, exiting", file=sys.stderr, flush=True)
+        sys.exit(3)
+
+    if os.path.exists(marker("hang", a.port)):
+        # A wedged listener: accepts connections, never answers them.
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((a.host, a.port))
+        sock.listen(16)
+        print(f"fake_tts hanging on {a.host}:{a.port}", flush=True)
+        held = []
+        while True:
+            conn, _ = sock.accept()
+            held.append(conn)
 
     crash_file = marker("crash", a.port)
     do_crash = not os.path.exists(crash_file)

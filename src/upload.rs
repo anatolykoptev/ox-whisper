@@ -47,7 +47,7 @@ pub(crate) async fn store_audio_part(
                 .extension()
                 .map(|e| e.to_string_lossy().to_string())
         })
-        .unwrap_or_else(|| "wav".to_string());
+        .unwrap_or_else(|| "bin".to_string());
     let data = field.bytes().await.map_err(|e| e.to_string())?;
     *slot = Some(TempFile::create(dir, &ext, &data).map_err(|e| e.to_string())?);
     Ok(())

@@ -4,9 +4,10 @@
 //! container's memory limit, so a file nobody removes is a slow outage:
 //! `/health` stays green while every request fails once the tmpfs is full.
 //! [`TempFile`] makes the leak impossible at the source: whoever owns the
-//! value owns the file, and dropping it — normal return, early `?`, a panic
-//! unwinding, or an axum handler future cancelled by a client that went away —
-//! removes the file.
+//! value owns the file, and dropping it — normal return, early `?`, or an axum
+//! handler future cancelled by a client that went away — removes the file.
+//! (A panic aborts the process in release builds, `panic = "abort"`, so the
+//! tmpfs dies with the container; no unwinding is relied on.)
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,9 @@ impl TempFile {
 
     /// Creates `<dir>/<uuid>.<ext>` holding `data`. `ext` is client input
     /// (an upload's file name), so it is reduced to a short ASCII-alphanumeric
-    /// suffix; anything else becomes `wav`.
+    /// suffix; anything else becomes `bin`, never `wav`: `ensure_wav` trusts a
+    /// `.wav` suffix and skips ffmpeg, so a mangled name (`voice.og_g`) must
+    /// not turn Ogg bytes into a "WAV".
     pub fn create(dir: &Path, ext: &str, data: &[u8]) -> io::Result<Self> {
         let file = Self::own(dir.join(format!("{}.{}", uuid::Uuid::new_v4(), safe_ext(ext))));
         std::fs::write(&file.path, data)?;
@@ -53,7 +56,7 @@ fn safe_ext(ext: &str) -> &str {
     if !ext.is_empty() && ext.len() <= 10 && ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
         ext
     } else {
-        "wav"
+        "bin"
     }
 }
 
@@ -122,7 +125,7 @@ mod tests {
             "waaaaaaaaaaaaaaaav",
             "é",
         ] {
-            assert_eq!(safe_ext(evil), "wav", "{evil:?}");
+            assert_eq!(safe_ext(evil), "bin", "{evil:?}");
         }
         assert_eq!(safe_ext("mp3"), "mp3");
         assert_eq!(safe_ext("M4A"), "M4A");

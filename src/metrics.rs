@@ -20,6 +20,8 @@ pub mod names {
     pub const POOL_SIZE: &str = "oxwhisper_recognizer_pool_size";
     pub const POOL_BUSY: &str = "oxwhisper_recognizer_pool_busy";
     pub const WS_ACTIVE: &str = "oxwhisper_ws_active_connections";
+    /// Interim WebSocket decodes skipped because the decode could not run.
+    pub const WS_INTERIM_SKIPPED: &str = "oxwhisper_ws_interim_skipped_total";
     /// WebSocket sessions closed because their audio buffer hit its cap.
     pub const WS_BUFFER_LIMIT: &str = "oxwhisper_ws_buffer_limit_total";
     pub const POOL_EVICTIONS: &str = "oxwhisper_pool_evictions_total";

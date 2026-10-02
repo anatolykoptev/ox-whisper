@@ -2,41 +2,27 @@ use std::env;
 
 /// Application configuration parsed from environment variables.
 pub struct Config {
-    /// Server port (MOONSHINE_PORT, default: 8092)
+    /// Server port (MOONSHINE_PORT, default: 8092 — the name predates Parakeet
+    /// and is kept because deployed compose files set it)
     pub port: u16,
-    /// English models directory (MOONSHINE_MODELS_DIR, default: "/models")
-    pub models_dir: String,
-    /// Russian models directory (ZIPFORMER_RU_DIR, default: "/ru-models")
-    pub ru_models_dir: String,
     /// Parakeet TDT v3 model directory (PARAKEET_DIR, default: "/parakeet-models")
     pub parakeet_dir: String,
-    /// Languages routed to Parakeet (PARAKEET_LANGS, comma-separated, default:
-    /// the 25 European languages Parakeet TDT v3 covers). An empty value or
-    /// `off` disables Parakeet: it is not loaded and every language falls back
-    /// to the Zipformer (ru) / Moonshine (other) route — a rollback without a
-    /// rebuild.
-    pub parakeet_langs: Vec<String>,
     /// Idle-eviction threshold for Parakeet, seconds
-    /// (PARAKEET_IDLE_EVICT_SECS, default: 0 = never; it does not inherit
-    /// OX_WHISPER_IDLE_EVICT_SECS — a reload more than doubles RSS)
+    /// (PARAKEET_IDLE_EVICT_SECS, default: 0 = never; a reload more than
+    /// doubles RSS)
     pub parakeet_idle_evict_secs: u64,
-    /// Parakeet recognizer instances (PARAKEET_POOL_SIZE, default: POOL_SIZE).
-    /// Each instance holds its own ~1.1 GB encoder session.
+    /// Parakeet recognizer instances (PARAKEET_POOL_SIZE, default: 1).
+    /// Each instance holds its own ~3.2 GB encoder session.
     pub parakeet_pool_size: usize,
     /// Silero VAD model path (SILERO_VAD_MODEL, default: "/vad/silero_vad.onnx")
     pub vad_model: String,
-    /// Punctuation model path (PUNCT_MODEL, default: "/punct/model.int8.onnx")
-    pub punct_model: String,
-    /// Punctuation BPE vocab path (PUNCT_VOCAB, default: "/punct/bpe.vocab")
-    pub punct_vocab: String,
-    /// Number of threads for inference (MOONSHINE_THREADS, default: 4)
+    /// Number of threads for inference (MOONSHINE_THREADS, default: 4 — name
+    /// kept for deployed compose files)
     pub num_threads: i32,
     /// Minimum VAD segment duration in seconds (VAD_MIN_DURATION_S, default: 10.0)
     pub vad_min_duration_s: f64,
     /// Maximum audio duration in seconds (MAX_AUDIO_DURATION_S, default: 0 = no limit)
     pub max_audio_duration_s: f64,
-    /// Number of recognizer instances per model (POOL_SIZE, default: 2)
-    pub pool_size: usize,
     /// How long a request waits for a busy recognizer before failing, seconds
     /// (POOL_ACQUIRE_TIMEOUT_S, default: 30)
     pub pool_acquire_timeout_s: u64,
@@ -58,14 +44,8 @@ pub struct Config {
     pub max_body_size_mb: usize,
     /// ONNX execution provider (ONNX_PROVIDER, default: "cpu")
     pub provider: String,
-    /// Diarization segmentation model path (DIARIZE_SEGMENTATION_MODEL)
-    pub diarize_segmentation_model: String,
-    /// Diarization embedding model path (DIARIZE_EMBEDDING_MODEL)
-    pub diarize_embedding_model: String,
     /// Prometheus metrics port (OXWHISPER_PROM_PORT, default: 9092)
     pub prom_port: u16,
-    /// Idle eviction threshold in seconds (OX_WHISPER_IDLE_EVICT_SECS, default: 0 = disabled)
-    pub idle_evict_secs: u64,
     /// Where uploads are written: the system temp dir. A field rather than a
     /// variable so tests can point a handler at a scratch directory.
     pub upload_dir: std::path::PathBuf,
@@ -74,34 +54,30 @@ pub struct Config {
     pub ws_max_buffer_s: usize,
 }
 
-/// Languages Parakeet TDT 0.6B v3 transcribes (its model card's 25 European
-/// languages), as ISO 639-1 codes.
-pub const PARAKEET_V3_LANGS: &[&str] = &[
-    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt",
-    "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
+/// Settings that older versions read and this one ignores. An operator who
+/// still sets one expects an effect — `PARAKEET_LANGS=off` was the rollback to
+/// the old models — so startup says it is dead instead of leaving a silent
+/// no-op.
+const REMOVED_SETTINGS: &[&str] = &[
+    "PARAKEET_LANGS",
+    "ZIPFORMER_RU_DIR",
+    "MOONSHINE_MODELS_DIR",
+    "PUNCT_MODEL",
+    "PUNCT_VOCAB",
+    "DIARIZE_SEGMENTATION_MODEL",
+    "DIARIZE_EMBEDDING_MODEL",
+    "POOL_SIZE",
+    "OX_WHISPER_IDLE_EVICT_SECS",
+    "TTS_ENABLED",
 ];
 
-/// Parses `PARAKEET_LANGS`. Unset → every Parakeet v3 language; empty or
-/// `off`/`none` → no language (Parakeet disabled).
-pub fn parse_parakeet_langs(raw: Option<&str>) -> Vec<String> {
-    let Some(raw) = raw else {
-        return PARAKEET_V3_LANGS.iter().map(|l| l.to_string()).collect();
-    };
-    let trimmed = raw.trim().to_lowercase();
-    if matches!(trimmed.as_str(), "" | "off" | "none") {
-        return Vec::new();
-    }
-    let mut langs: Vec<String> = Vec::new();
-    for lang in trimmed.split(',').map(str::trim).filter(|l| !l.is_empty()) {
-        if !PARAKEET_V3_LANGS.contains(&lang) {
-            tracing::warn!("PARAKEET_LANGS: '{lang}' is not a Parakeet v3 language; ignoring it");
-            continue;
-        }
-        if !langs.iter().any(|l| l == lang) {
-            langs.push(lang.to_string());
-        }
-    }
-    langs
+/// The [`REMOVED_SETTINGS`] that `get` finds set.
+pub fn removed_settings_present(get: &dyn Fn(&str) -> Option<String>) -> Vec<&'static str> {
+    REMOVED_SETTINGS
+        .iter()
+        .copied()
+        .filter(|name| get(name).is_some())
+        .collect()
 }
 
 fn real_env(name: &str) -> Option<String> {
@@ -157,25 +133,21 @@ impl Config {
     /// Like [`Self::from_env`] over any variable source, so tests can set a
     /// configuration without touching the process environment.
     pub fn from_lookup(get: &dyn Fn(&str) -> Option<String>) -> Self {
-        let port = parse_env(get, "MOONSHINE_PORT").unwrap_or(8092);
-        let prom_port = parse_env(get, "OXWHISPER_PROM_PORT").unwrap_or(9092);
-        let idle_evict_secs = parse_env(get, "OX_WHISPER_IDLE_EVICT_SECS").unwrap_or(0);
-        let pool_size = parse_env(get, "POOL_SIZE").unwrap_or(2);
         Self {
-            port,
-            models_dir: get("MOONSHINE_MODELS_DIR").unwrap_or_else(|| "/models".to_string()),
-            ru_models_dir: get("ZIPFORMER_RU_DIR").unwrap_or_else(|| "/ru-models".to_string()),
+            port: parse_env(get, "MOONSHINE_PORT").unwrap_or(8092),
             parakeet_dir: get("PARAKEET_DIR").unwrap_or_else(|| "/parakeet-models".to_string()),
-            parakeet_langs: parse_parakeet_langs(get("PARAKEET_LANGS").as_deref()),
-            parakeet_pool_size: env_num(get, "PARAKEET_POOL_SIZE", 1, pool_size.max(1)),
+            parakeet_pool_size: env_num(get, "PARAKEET_POOL_SIZE", 1, 1),
+            parakeet_idle_evict_secs: env_num(
+                get,
+                "PARAKEET_IDLE_EVICT_SECS",
+                0,
+                PARAKEET_IDLE_EVICT_DEFAULT_SECS,
+            ),
             vad_model: get("SILERO_VAD_MODEL")
                 .unwrap_or_else(|| "/vad/silero_vad.onnx".to_string()),
-            punct_model: get("PUNCT_MODEL").unwrap_or_else(|| "/punct/model.int8.onnx".to_string()),
-            punct_vocab: get("PUNCT_VOCAB").unwrap_or_else(|| "/punct/bpe.vocab".to_string()),
             num_threads: parse_env(get, "MOONSHINE_THREADS").unwrap_or(4),
             vad_min_duration_s: parse_env(get, "VAD_MIN_DURATION_S").unwrap_or(10.0),
             max_audio_duration_s: parse_env(get, "MAX_AUDIO_DURATION_S").unwrap_or(0.0),
-            pool_size,
             pool_acquire_timeout_s: env_num(get, "POOL_ACQUIRE_TIMEOUT_S", 0, 30),
             vad_threshold: parse_env(get, "VAD_THRESHOLD").unwrap_or(0.5),
             vad_min_silence_s: parse_env(get, "VAD_MIN_SILENCE_S").unwrap_or(0.5),
@@ -186,20 +158,9 @@ impl Config {
             hallucination_threshold: parse_env(get, "HALLUCINATION_THRESHOLD").unwrap_or(2.4),
             max_body_size_mb: parse_env(get, "MAX_BODY_SIZE_MB").unwrap_or(50),
             provider: get("ONNX_PROVIDER").unwrap_or_else(|| "cpu".to_string()),
-            diarize_segmentation_model: get("DIARIZE_SEGMENTATION_MODEL")
-                .unwrap_or_else(|| "/diarize/segmentation.onnx".to_string()),
-            diarize_embedding_model: get("DIARIZE_EMBEDDING_MODEL")
-                .unwrap_or_else(|| "/diarize/embedding.onnx".to_string()),
-            prom_port,
-            idle_evict_secs,
+            prom_port: parse_env(get, "OXWHISPER_PROM_PORT").unwrap_or(9092),
             upload_dir: env::temp_dir(),
             ws_max_buffer_s: env_num(get, "WS_MAX_BUFFER_S", 1, 120),
-            parakeet_idle_evict_secs: env_num(
-                get,
-                "PARAKEET_IDLE_EVICT_SECS",
-                0,
-                PARAKEET_IDLE_EVICT_DEFAULT_SECS,
-            ),
         }
     }
 }
@@ -217,14 +178,32 @@ mod tests {
         }
     }
 
-    /// The global idle threshold is for the small models. Parakeet must stay
-    /// resident unless its own variable says otherwise: a reload more than
-    /// doubles RSS.
+    /// The old global idle threshold no longer exists. A deployment that still
+    /// sets it must not get Parakeet evicted: a reload more than doubles RSS.
     #[test]
-    fn parakeet_does_not_inherit_the_global_eviction_threshold() {
+    fn the_old_global_eviction_threshold_does_not_reach_parakeet() {
         let cfg = Config::from_lookup(&lookup(&[("OX_WHISPER_IDLE_EVICT_SECS", "600")]));
-        assert_eq!(cfg.idle_evict_secs, 600, "the global knob still applies");
         assert_eq!(cfg.parakeet_idle_evict_secs, 0);
+    }
+
+    #[test]
+    fn leftover_settings_are_reported_not_silently_ignored() {
+        let got = removed_settings_present(&lookup(&[
+            ("PARAKEET_LANGS", "off"),
+            ("POOL_SIZE", "2"),
+            ("PARAKEET_DIR", "/m"),
+        ]));
+        assert_eq!(got, vec!["PARAKEET_LANGS", "POOL_SIZE"]);
+        assert!(removed_settings_present(&lookup(&[("PARAKEET_DIR", "/m")])).is_empty());
+    }
+
+    #[test]
+    fn one_parakeet_slot_by_default() {
+        // Each slot holds a ~3.2 GB encoder: the default must not be 2.
+        let cfg = Config::from_lookup(&lookup(&[("POOL_SIZE", "2")]));
+        assert_eq!(cfg.parakeet_pool_size, 1);
+        let cfg = Config::from_lookup(&lookup(&[("PARAKEET_POOL_SIZE", "2")]));
+        assert_eq!(cfg.parakeet_pool_size, 2);
     }
 
     #[test]

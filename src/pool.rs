@@ -50,6 +50,9 @@ pub struct EvictablePool<T> {
     /// waiters. The counter closes the race between a failed try and the wait.
     released: Arc<(Mutex<u64>, Condvar)>,
     acquire_timeout: Duration,
+    /// The last slot reinit failed (and none has succeeded since): the pool
+    /// cannot serve an evicted slot, which `/health` must say.
+    reinit_failing: std::sync::atomic::AtomicBool,
 }
 
 impl<T: Send + 'static> EvictablePool<T> {
@@ -79,6 +82,7 @@ impl<T: Send + 'static> EvictablePool<T> {
             idle_secs,
             released: Arc::new((Mutex::new(0), Condvar::new())),
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+            reinit_failing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -108,7 +112,15 @@ impl<T: Send + 'static> EvictablePool<T> {
             idle_secs,
             released: Arc::new((Mutex::new(0), Condvar::new())),
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+            reinit_failing: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// False while the most recent reinit of an evicted slot has failed: a
+    /// pool in that state answers requests with an error, however many slots
+    /// it nominally has. `/health` reports it.
+    pub fn is_healthy(&self) -> bool {
+        !self.reinit_failing.load(Ordering::Acquire)
     }
 
     /// Sets how long [`Self::acquire`] waits for a busy slot.
@@ -198,12 +210,15 @@ impl<T: Send + 'static> EvictablePool<T> {
                     Err(e) => {
                         tracing::error!("pool slot reinit failed: {e}");
                         metrics::counter!(crate::metrics::names::POOL_REINIT_FAILURES).increment(1);
+                        self.reinit_failing.store(true, Ordering::Release);
                         // Leave slot as None; clear busy so next acquire can retry.
                         slot.busy.store(false, Ordering::Release);
                         notify_released(&self.released);
                         return Err(AcquireError::ReinitFailed(e));
                     }
                 };
+
+                self.reinit_failing.store(false, Ordering::Release);
 
                 // Store the new item and return it under the lock.
                 let mut guard = match slot.item.lock() {
@@ -304,6 +319,12 @@ impl<T: Send + 'static> EvictablePool<T> {
                 }
             }
         })
+    }
+
+    /// Test helper: force the unhealthy state a failed reinit would leave.
+    #[cfg(test)]
+    pub fn set_reinit_failing(&self, failing: bool) {
+        self.reinit_failing.store(failing, Ordering::Release);
     }
 
     /// Test helper: push all slots' last_used `secs` seconds into the past.
@@ -522,6 +543,36 @@ mod tests {
             guard.is_some(),
             "idle_secs=0 → no eviction even with stale last_used"
         );
+    }
+
+    /// A pool whose evicted slot cannot be rebuilt must say so, and recover
+    /// the moment a rebuild succeeds.
+    #[test]
+    fn a_failing_reinit_marks_the_pool_unhealthy_until_one_succeeds() {
+        use std::sync::atomic::AtomicBool;
+        let broken = Arc::new(AtomicBool::new(true));
+        let b = broken.clone();
+        let pool = EvictablePool::from_items(
+            vec![0u32],
+            1,
+            Arc::new(move || {
+                if b.load(Ordering::SeqCst) {
+                    Err(anyhow::anyhow!("out of memory"))
+                } else {
+                    Ok(7u32)
+                }
+            }),
+        );
+        assert!(pool.is_healthy(), "a fresh pool is healthy");
+
+        pool.force_last_used_ago(10);
+        pool.evict_idle(1);
+        assert!(pool.acquire().is_err());
+        assert!(!pool.is_healthy(), "a failed reinit must be visible");
+
+        broken.store(false, Ordering::SeqCst);
+        drop(pool.acquire().expect("reinit succeeds now"));
+        assert!(pool.is_healthy(), "a successful reinit clears it");
     }
 
     // ── B2. factory_error_returns_err_and_slot_stays_alive ──────────────────

@@ -39,15 +39,14 @@ pub struct Word {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VerboseJsonResponse {
     pub text: String,
-    pub language: String,
+    /// The language hint the request carried; absent when it carried none —
+    /// the model does not report what it heard, and none is guessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     pub duration: f64,
     pub segments: Vec<Segment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Word>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub language_confidence: Option<f64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub utterances: Vec<crate::diarize::Utterance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
 }
@@ -108,7 +107,6 @@ mod tests {
                 start: i as f32,
                 end: i as f32 + 0.5,
                 confidence: None,
-                speaker: None,
             })
             .collect();
 
@@ -132,37 +130,39 @@ mod tests {
         assert_eq!(json["text"], "hello world");
     }
 
-    #[test]
-    fn verbose_response_omits_empty_words() {
-        let resp = VerboseJsonResponse {
+    fn verbose(language: Option<&str>) -> VerboseJsonResponse {
+        VerboseJsonResponse {
             text: "hi".to_string(),
-            language: "en".to_string(),
-            duration: 1.0,
+            language: language.map(str::to_string),
+            duration: 1.5,
             segments: vec![],
             words: vec![],
-            language_confidence: None,
-            utterances: vec![],
             extra: None,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(!json.contains("words"));
-        assert!(!json.contains("language_confidence"));
+        }
     }
 
     #[test]
-    fn verbose_response_includes_language_confidence() {
-        let resp = VerboseJsonResponse {
-            text: "hi".to_string(),
-            language: "en".to_string(),
-            duration: 1.0,
-            segments: vec![],
-            words: vec![],
-            language_confidence: Some(0.8),
-            utterances: vec![],
-            extra: None,
-        };
-        let json: serde_json::Value = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["language_confidence"], 0.8);
+    fn verbose_response_omits_empty_words() {
+        let json = serde_json::to_string(&verbose(Some("en"))).unwrap();
+        assert!(!json.contains("words"));
+    }
+
+    /// The fields clients read from `verbose_json`: text,
+    /// language (echoed hint), duration.
+    #[test]
+    fn verbose_response_keeps_the_fields_clients_read() {
+        let json = serde_json::to_value(verbose(Some("ru"))).unwrap();
+        assert_eq!(json["text"], "hi");
+        assert_eq!(json["language"], "ru");
+        assert_eq!(json["duration"], 1.5);
+        assert!(json["segments"].is_array());
+    }
+
+    /// No hint, no language: the model does not report one and none is made up.
+    #[test]
+    fn verbose_response_has_no_language_when_none_was_given() {
+        let json = serde_json::to_value(verbose(None)).unwrap();
+        assert!(json.get("language").is_none(), "{json}");
     }
 
     #[test]
@@ -177,17 +177,7 @@ mod tests {
 
     #[test]
     fn verbose_response_omits_null_extra() {
-        let resp = VerboseJsonResponse {
-            text: "hi".to_string(),
-            language: "en".to_string(),
-            duration: 1.0,
-            language_confidence: None,
-            segments: vec![],
-            words: vec![],
-            utterances: vec![],
-            extra: None,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
+        let json = serde_json::to_value(verbose(Some("en"))).unwrap();
         assert!(json.get("extra").is_none());
     }
 }

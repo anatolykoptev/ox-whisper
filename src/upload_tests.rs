@@ -120,7 +120,7 @@ async fn an_upload_owns_its_file_until_dropped() {
     let upload = parse_openai_upload(&mut multipart_of(body).await, &dir)
         .await
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(upload.language, "ru");
+    assert_eq!(crate::language::resolve(&upload.language), Ok(Some("ru")));
     assert_eq!(listing(&dir).len(), 1);
     assert_eq!(std::fs::read(upload.file.path()).unwrap(), b"audio-bytes");
     drop(upload);

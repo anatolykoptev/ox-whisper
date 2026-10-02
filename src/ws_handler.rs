@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use crate::chunking::sanitize_utf8;
 use crate::handlers::AppState;
-use crate::transcribe::{TranscribeError, maybe_punctuate, split_audio_chunks, transcribe_routed};
+use crate::language;
+use crate::models::PARAKEET_MODEL_NAME;
+use crate::transcribe::{TranscribeError, split_audio_chunks, transcribe_chunks};
 use crate::words::{WordTimestamp, compute_chunk_offsets};
 use crate::ws_session::WsSession;
 use crate::ws_types::{ClientMessage, ServerMessage, WsParams};
@@ -31,6 +33,11 @@ pub async fn ws_listen(
     Query(params): Query<WsParams>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // Refused before the upgrade, so the client sees a 400 and not a socket
+    // that opens and then produces text in the wrong language.
+    if let Err(e) = language::resolve(&params.language) {
+        return e.into_response();
+    }
     ws.on_upgrade(move |socket| handle_ws(socket, state, params))
 }
 
@@ -40,16 +47,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
     let _conn = WsConnGuard { start };
 
     let request_id = uuid::Uuid::new_v4().to_string();
-    let model = if params.language == "ru" {
-        "gigaam"
-    } else {
-        "moonshine-v2"
-    };
 
     // Send metadata
     let meta = ServerMessage::Metadata {
         request_id: request_id.clone(),
-        model: model.to_string(),
+        model: PARAKEET_MODEL_NAME.to_string(),
         channels: 1,
     };
     if send_msg(&mut socket, &meta).await.is_err() {
@@ -92,8 +94,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
                         }
                     }
                     if speech_final {
-                        if let Some(msg) = do_transcribe(&state, &mut session, &params, false).await
-                        {
+                        if let Some(msg) = do_transcribe(&state, &mut session, false).await {
                             if send_msg(&mut socket, &msg).await.is_err() {
                                 return;
                             }
@@ -104,7 +105,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
 
                 // Interim results
                 if params.interim_results && session.should_emit_interim(INTERIM_INTERVAL_S) {
-                    if let Some(msg) = do_transcribe_interim(&state, &mut session, &params).await {
+                    if let Some(msg) = do_transcribe_interim(&state, &mut session).await {
                         if send_msg(&mut socket, &msg).await.is_err() {
                             return;
                         }
@@ -114,14 +115,14 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
             }
             Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                 Ok(ClientMessage::Finalize) => {
-                    if let Some(msg) = do_transcribe(&state, &mut session, &params, true).await {
+                    if let Some(msg) = do_transcribe(&state, &mut session, true).await {
                         if send_msg(&mut socket, &msg).await.is_err() {
                             return;
                         }
                     }
                 }
                 Ok(ClientMessage::CloseStream) => {
-                    if let Some(msg) = do_transcribe(&state, &mut session, &params, true).await {
+                    if let Some(msg) = do_transcribe(&state, &mut session, true).await {
                         let _ = send_msg(&mut socket, &msg).await;
                     }
                     let _ = send_msg(&mut socket, &ServerMessage::CloseStream).await;
@@ -142,14 +143,13 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
 async fn do_transcribe(
     state: &Arc<AppState>,
     session: &mut WsSession,
-    params: &WsParams,
     from_finalize: bool,
 ) -> Option<ServerMessage> {
     let samples = session.take_buffer();
     if samples.is_empty() {
         return None;
     }
-    match transcribe_buffer(state, samples, &params.language, params.punctuate).await {
+    match transcribe_buffer(state, samples).await {
         Ok(Some((text, words))) => Some(session.store_final(text, words, from_finalize)),
         Ok(None) => None,
         Err(e) => Some(buffer_error(&e)),
@@ -160,13 +160,12 @@ async fn do_transcribe(
 async fn do_transcribe_interim(
     state: &Arc<AppState>,
     session: &mut WsSession,
-    params: &WsParams,
 ) -> Option<ServerMessage> {
     let samples = session.peek_buffer();
     if samples.is_empty() {
         return None;
     }
-    match transcribe_buffer(state, samples, &params.language, params.punctuate).await {
+    match transcribe_buffer(state, samples).await {
         Ok(Some((text, words))) => Some(session.interim_result(text, words)),
         Ok(None) => None,
         Err(e) => Some(buffer_error(&e)),
@@ -187,27 +186,19 @@ fn buffer_error(e: &TranscribeError) -> ServerMessage {
 async fn transcribe_buffer(
     state: &Arc<AppState>,
     samples: Vec<f32>,
-    language: &str,
-    punctuate: bool,
 ) -> Result<Option<(String, Vec<WordTimestamp>)>, TranscribeError> {
     let models = state.clone();
-    let lang = language.to_string();
-    let punct = punctuate;
 
     tokio::task::spawn_blocking(move || {
         let config = &models.config;
-        let engine = models.models.route(&lang, &config.parakeet_langs);
-        // The session buffer is not capped, so decode it in bounded chunks
-        // (and bounded batches) like the batch endpoint — never as one call,
-        // which on Parakeet's full-attention encoder grows memory with the
-        // square of the stream length and pins the slot.
+        // Decode in bounded chunks (and bounded batches) like the batch
+        // endpoint — never as one call, which on Parakeet's full-attention
+        // encoder grows memory with the square of the buffer length and pins
+        // the slot. The buffer itself is capped by WS_MAX_BUFFER_S.
         let chunks = split_audio_chunks(samples, config.max_chunk_s * 16000);
         let offsets = compute_chunk_offsets(&chunks, 16000);
-        let (engine, texts, words) = transcribe_routed(
+        let (texts, words) = transcribe_chunks(
             &models.models,
-            config,
-            engine,
-            &lang,
             &chunks,
             &offsets,
             config.hallucination_threshold,
@@ -216,11 +207,6 @@ async fn transcribe_buffer(
         if text.is_empty() {
             return Ok(None);
         }
-        let text = if punct {
-            maybe_punctuate(&models.models, &text, &lang, engine, Some(true))
-        } else {
-            text
-        };
         Ok(Some((text, words)))
     })
     .await

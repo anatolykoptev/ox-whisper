@@ -12,6 +12,7 @@ pub struct OpenAIUpload {
     /// blocking decode job can outlive a cancelled handler without losing the
     /// file under it.
     pub file: std::sync::Arc<TempFile>,
+    /// The language hint as sent; validated with [`crate::language::resolve`].
     pub language: String,
     pub response_format: ResponseFormat,
     pub want_words: bool,
@@ -22,8 +23,6 @@ pub struct OpenAIUpload {
     pub pii_format: crate::pii::RedactFormat,
     pub keywords: Vec<String>,
     pub keywords_boost: f64,
-    pub diarize: bool,
-    pub diarize_speakers: Option<i32>,
     pub extra: Option<serde_json::Value>,
 }
 
@@ -90,8 +89,6 @@ pub async fn parse_openai_upload(
     let mut pii_format = crate::pii::RedactFormat::default();
     let mut keywords: Vec<String> = Vec::new();
     let mut keywords_boost: f64 = 0.8;
-    let mut diarize_flag = false;
-    let mut diarize_speakers: Option<i32> = None;
     let mut extra: Option<serde_json::Value> = None;
 
     while let Some(field) = next_part(multipart).await? {
@@ -146,13 +143,13 @@ pub async fn parse_openai_upload(
                 let val = text_part(field).await?;
                 keywords_boost = val.parse().unwrap_or(0.8);
             }
+            // Speaker diarization was removed: answering without speakers would
+            // look like a single-speaker result, so it is refused instead.
             "diarize" => {
                 let val = text_part(field).await?;
-                diarize_flag = val == "true" || val == "1";
-            }
-            "diarize_speakers" => {
-                let val = text_part(field).await?;
-                diarize_speakers = val.parse().ok();
+                if val == "true" || val == "1" {
+                    return Err("diarization is not supported".to_string());
+                }
             }
             "extra" => {
                 let val = text_part(field).await?;
@@ -169,7 +166,7 @@ pub async fn parse_openai_upload(
 
     Ok(OpenAIUpload {
         file: std::sync::Arc::new(file.ok_or("missing 'file' field")?),
-        language: normalize_language(&language),
+        language,
         response_format,
         want_words,
         custom_spelling,
@@ -179,14 +176,8 @@ pub async fn parse_openai_upload(
         pii_format,
         keywords,
         keywords_boost,
-        diarize: diarize_flag,
-        diarize_speakers,
         extra,
     })
-}
-
-fn normalize_language(lang: &str) -> String {
-    lang.trim().to_lowercase()
 }
 
 #[cfg(test)]

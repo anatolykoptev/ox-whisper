@@ -51,7 +51,7 @@ log "Fetching scripts/download-models.sh..."
 curl -fsSL "$OX_WHISPER_REPO_RAW/scripts/download-models.sh" -o scripts/download-models.sh
 chmod +x scripts/download-models.sh
 
-log "Downloading ASR models (~3 GB with Parakeet; OX_WHISPER_PARAKEET=0 skips it: ~463 MB)..."
+log "Downloading models (~2.5 GB: Parakeet TDT v3 and the VAD)..."
 ./scripts/download-models.sh ./models
 
 log "Pulling ox-whisper image ($OX_WHISPER_VERSION)..."

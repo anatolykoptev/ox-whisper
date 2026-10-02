@@ -6,12 +6,8 @@ use serde::Serialize;
 use crate::audio::{ensure_wav, load_wav};
 use crate::chunking::sanitize_utf8;
 use crate::config::Config;
-use crate::models::Models;
-use crate::recognizer::RuRecognizer;
-use crate::routing::Engine;
-use crate::transcribe::{
-    TranscribeError, TranscribeResult, compression_ratio, maybe_punctuate, split_audio_chunks,
-};
+use crate::models::{Models, PARAKEET_POOL_LABEL};
+use crate::transcribe::{TranscribeError, TranscribeResult, compression_ratio, split_audio_chunks};
 use crate::vad::{apply_vad, lock_vad};
 
 #[derive(Serialize, Clone)]
@@ -27,14 +23,13 @@ pub fn transcribe_streaming(
     models: &Models,
     config: &Config,
     audio_path: &Path,
-    language: &str,
     vad_override: Option<bool>,
     tx: tokio::sync::mpsc::Sender<StreamEvent>,
 ) -> Result<TranscribeResult, TranscribeError> {
     let start = Instant::now();
     let wav = ensure_wav(audio_path)?;
 
-    let result = do_transcribe_streaming(models, config, wav.path(), language, vad_override, &tx);
+    let result = do_transcribe_streaming(models, config, wav.path(), vad_override, &tx);
 
     let mut res = result?;
     res.duration_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -45,7 +40,6 @@ fn do_transcribe_streaming(
     models: &Models,
     config: &Config,
     wav_path: &Path,
-    language: &str,
     vad_override: Option<bool>,
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
 ) -> Result<TranscribeResult, TranscribeError> {
@@ -83,38 +77,17 @@ fn do_transcribe_streaming(
 
     let total = audio_chunks.len();
 
-    let threshold = config.hallucination_threshold;
-    let engine = models.route(language, &config.parakeet_langs);
-    let run = |engine: Engine| match engine {
-        Engine::Parakeet | Engine::Ru => transcribe_offline_streaming(
-            models.offline_pool(engine),
-            engine,
-            language,
-            &audio_chunks,
-            total,
-            tx,
-            threshold,
-        ),
-        Engine::Moonshine => {
-            transcribe_en_streaming(models, &audio_chunks, language, total, tx, threshold)
-        }
-    };
-    // Same reload fallback as the batch path (see transcribe_routed).
-    let (engine, texts) = match run(engine) {
-        Err(TranscribeError::ReloadFailed(_)) if engine == Engine::Parakeet => {
-            let fallback = models
-                .reload_fallback(language, &config.parakeet_langs)
-                .ok_or(TranscribeError::ReloadFailed(engine.label()))?;
-            metrics::counter!(crate::metrics::names::ROUTE_FALLBACK, "to" => fallback.label())
-                .increment(1);
-            (fallback, run(fallback)?)
-        }
-        other => (engine, other?),
-    };
+    let texts = transcribe_streaming_chunks(
+        models,
+        &audio_chunks,
+        total,
+        tx,
+        config.hallucination_threshold,
+    )?;
 
+    // Parakeet writes case and punctuation itself.
     let joined = texts.join(" ");
     let text = sanitize_utf8(joined.trim());
-    let text = maybe_punctuate(models, &text, language, engine, None);
 
     Ok(TranscribeResult {
         text,
@@ -126,56 +99,20 @@ fn do_transcribe_streaming(
     })
 }
 
-fn transcribe_offline_streaming(
-    pool: Option<&std::sync::Arc<crate::pool::EvictablePool<RuRecognizer>>>,
-    engine: Engine,
-    language: &str,
-    chunks: &[Vec<f32>],
-    total: usize,
-    tx: &tokio::sync::mpsc::Sender<StreamEvent>,
-    threshold: f64,
-) -> Result<Vec<String>, TranscribeError> {
-    let pool = pool.ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
-    let mut rec = pool.acquire().map_err(|e| {
-        tracing::warn!("{} pool acquire failed (streaming): {e}", engine.label());
-        match e {
-            crate::pool::AcquireError::ReinitFailed(_) => {
-                TranscribeError::ReloadFailed(engine.label())
-            }
-            crate::pool::AcquireError::AllBusy => TranscribeError::NoRecognizer,
-        }
-    })?;
-    let mut texts = Vec::new();
-    for (i, chunk) in chunks.iter().enumerate() {
-        let result = rec.transcribe(16000, chunk);
-        let text = result.text.trim().to_string();
-        if !text.is_empty() && compression_ratio(&text) <= threshold {
-            let _ = tx.blocking_send(StreamEvent {
-                chunk_index: i,
-                total_chunks: total,
-                text: text.clone(),
-            });
-            texts.push(text);
-        }
-    }
-    Ok(texts)
-}
-
-fn transcribe_en_streaming(
+fn transcribe_streaming_chunks(
     models: &Models,
     chunks: &[Vec<f32>],
-    language: &str,
     total: usize,
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
     threshold: f64,
 ) -> Result<Vec<String>, TranscribeError> {
-    let pool = models
-        .en
-        .as_ref()
-        .ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
+    let pool = models.parakeet_pool()?;
     let mut rec = pool.acquire().map_err(|e| {
-        tracing::warn!("EN pool acquire failed (streaming): {e}");
-        TranscribeError::NoRecognizer
+        tracing::warn!("{PARAKEET_POOL_LABEL} pool acquire failed (streaming): {e}");
+        match e {
+            crate::pool::AcquireError::ReinitFailed(_) => TranscribeError::ReloadFailed,
+            crate::pool::AcquireError::AllBusy => TranscribeError::NoRecognizer,
+        }
     })?;
     let mut texts = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {

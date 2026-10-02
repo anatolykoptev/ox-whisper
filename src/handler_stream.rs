@@ -3,15 +3,17 @@ use std::sync::Arc;
 
 use axum::extract::{Multipart, State};
 use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::handlers::{AppState, parse_upload};
+use crate::handlers::{AppState, observe, parse_upload};
+use crate::language;
 use crate::streaming;
 
 pub async fn transcribe_stream(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
     let endpoint = "transcribe_stream";
     let start = std::time::Instant::now();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -26,13 +28,19 @@ pub async fn transcribe_stream(
             let data = serde_json::json!({"type": "error", "message": msg});
             let _ = tx.send(Ok(Event::default().data(data.to_string()))).await;
             drop(tx);
-            return Sse::new(ReceiverStream::new(rx));
+            return Sse::new(ReceiverStream::new(rx)).into_response();
         }
     };
 
+    // The stream has not started, so an unsupported language can still be a
+    // plain 400 instead of an error event on a 200.
+    if let Err(e) = language::resolve(&upload.language) {
+        observe(endpoint, false, start);
+        return e.into_response();
+    }
+
     // Owned by the blocking job below: removed when it ends, on any path.
     let file = upload.file;
-    let language = upload.language;
     let vad = upload.vad;
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<streaming::StreamEvent>(32);
@@ -60,7 +68,6 @@ pub async fn transcribe_stream(
                 &state.models,
                 &state.config,
                 file.path(),
-                &language,
                 vad,
                 chunk_tx,
             )
@@ -102,5 +109,5 @@ pub async fn transcribe_stream(
         }
     });
 
-    Sse::new(ReceiverStream::new(rx))
+    Sse::new(ReceiverStream::new(rx)).into_response()
 }

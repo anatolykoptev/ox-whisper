@@ -18,7 +18,7 @@ type Client =
 
 /// Serves `/v1/listen` over an empty model set: no recognizer is loaded, so
 /// every decode fails — which is what the tests need to see reported.
-async fn connect(max_buffer_s: &'static str) -> Client {
+async fn serve(max_buffer_s: &'static str) -> std::net::SocketAddr {
     let config =
         Config::from_lookup(&move |k| (k == "WS_MAX_BUFFER_S").then(|| max_buffer_s.into()));
     let state = Arc::new(AppState {
@@ -31,6 +31,11 @@ async fn connect(max_buffer_s: &'static str) -> Client {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await });
+    addr
+}
+
+async fn connect(max_buffer_s: &'static str) -> Client {
+    let addr = serve(max_buffer_s).await;
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/listen?vad=false"))
         .await
         .unwrap();
@@ -91,5 +96,29 @@ async fn a_failed_decode_is_reported_to_the_client() {
     assert_eq!(msg["type"], "Error");
     let text = msg["message"].as_str().unwrap();
     assert!(!text.contains("buffer limit"), "{msg}");
-    assert!(text.contains("not supported or model not loaded"), "{msg}");
+    assert!(text.contains("no recognizer available"), "{msg}");
+}
+
+/// An unsupported language is refused before the upgrade; a supported one,
+/// and no language at all, upgrade (the positive controls).
+#[tokio::test]
+async fn an_unsupported_language_is_refused_before_the_upgrade() {
+    let addr = serve("1").await;
+    let url = |q: &str| format!("ws://{addr}/v1/listen?{q}");
+
+    let err = tokio_tungstenite::connect_async(url("language=zh"))
+        .await
+        .expect_err("zh must not upgrade");
+    match err {
+        tokio_tungstenite::tungstenite::Error::Http(res) => assert_eq!(res.status(), 400),
+        other => panic!("want an HTTP 400, got {other:?}"),
+    }
+    for ok in ["language=ru", "language=en-US", "vad=false"] {
+        let (mut ws, _) = tokio_tungstenite::connect_async(url(ok)).await.unwrap();
+        assert_eq!(
+            next_json(&mut ws).await.unwrap()["type"],
+            "Metadata",
+            "{ok}"
+        );
+    }
 }

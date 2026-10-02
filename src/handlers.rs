@@ -4,18 +4,16 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Multipart, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::models::Models;
-use crate::recognizer::PARAKEET_MODEL_NAME;
-use crate::routing::Engine;
+use crate::language::{self, PARAKEET_V3_LANGS};
+use crate::models::{Models, PARAKEET_MODEL_NAME};
 use crate::tmpfile::TempFile;
 use crate::transcribe;
 use crate::upload::{next_part, store_audio_part, text_part};
-
-/// Languages `/health` has always reported for the Moonshine route.
-const MOONSHINE_LANGS: &[&str] = &["ar", "en", "es", "ja", "uk", "vi", "zh"];
 
 pub struct AppState {
     pub models: Models,
@@ -28,7 +26,6 @@ pub struct HealthResponse {
     engine: &'static str,
     version: &'static str,
     vad: bool,
-    punctuation: bool,
     languages: HashMap<&'static str, LanguageInfo>,
 }
 
@@ -38,51 +35,51 @@ struct LanguageInfo {
     ready: bool,
 }
 
-pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let mut languages = HashMap::new();
-    let langs = ["ar", "en", "es", "ja", "uk", "vi", "zh", "ru"]
-        .into_iter()
-        .chain(crate::config::PARAKEET_V3_LANGS.iter().copied());
-    for lang in langs {
-        if languages.contains_key(lang) {
-            continue;
-        }
-        let engine = state.models.route(lang, &state.config.parakeet_langs);
-        let (model, ready) = match engine {
-            Engine::Parakeet => (PARAKEET_MODEL_NAME, true),
-            // Read at load time: taking a pool slot here would make every
-            // healthcheck compete with requests and block idle eviction.
-            Engine::Ru => (state.models.ru_model_name, state.models.ru.is_some()),
-            // Moonshine is listed only for the languages it always claimed.
-            Engine::Moonshine if !MOONSHINE_LANGS.contains(&lang) => continue,
-            Engine::Moonshine => ("moonshine-v2-base", state.models.en.is_some()),
-        };
-        languages.insert(lang, LanguageInfo { model, ready });
-    }
-
-    Json(HealthResponse {
-        status: "ok",
-        engine: "sherpa-onnx",
-        version: env!("CARGO_PKG_VERSION"),
-        vad: state.models.vad.is_some(),
-        punctuation: state.models.punct.is_some(),
-        languages,
-    })
+/// Readiness, not liveness: 503 while Parakeet cannot serve (no model, or an
+/// evicted slot that will not reload), so a probe that only checks the status
+/// code sees it. Reads load-time and pool state only — never a recognizer
+/// slot, which would make every healthcheck compete with requests.
+pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<HealthResponse>) {
+    let ready = state.models.parakeet_ready();
+    let languages = PARAKEET_V3_LANGS
+        .iter()
+        .map(|lang| {
+            (
+                *lang,
+                LanguageInfo {
+                    model: PARAKEET_MODEL_NAME,
+                    ready,
+                },
+            )
+        })
+        .collect();
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(HealthResponse {
+            status: if ready { "ok" } else { "degraded" },
+            engine: "sherpa-onnx",
+            version: env!("CARGO_PKG_VERSION"),
+            vad: state.models.vad.is_some(),
+            languages,
+        }),
+    )
 }
 
 #[derive(Deserialize)]
 pub struct TranscribeRequest {
     pub audio_path: String,
-    #[serde(default = "default_language")]
+    /// Language hint; empty or `auto` means none. Checked against the
+    /// languages Parakeet covers.
+    #[serde(default)]
     pub language: String,
     pub vad: Option<bool>,
     #[serde(default)]
     pub max_chunk_len: usize,
-    pub punctuate: Option<bool>,
-}
-
-fn default_language() -> String {
-    "en".to_string()
 }
 
 #[derive(Serialize)]
@@ -105,17 +102,31 @@ fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
+/// Request count and latency for one endpoint call.
+pub(crate) fn observe(endpoint: &'static str, ok: bool, start: std::time::Instant) {
+    let status = if ok { "ok" } else { "err" };
+    metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
+        .increment(1);
+    metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
+        .record(start.elapsed().as_secs_f64());
+}
+
 pub async fn transcribe_json(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TranscribeRequest>,
-) -> Json<TranscribeResponse> {
+) -> Response {
     let endpoint = "transcribe_json";
     let start = std::time::Instant::now();
 
-    let language = normalize_language(&req.language);
+    let language = match language::resolve(&req.language) {
+        Ok(l) => l,
+        Err(e) => {
+            observe(endpoint, false, start);
+            return e.into_response();
+        }
+    };
     let audio_path = req.audio_path.clone();
     let vad = req.vad;
-    let punctuate = req.punctuate;
     let max_chunk_len = req.max_chunk_len;
 
     let result = tokio::task::spawn_blocking(move || {
@@ -123,69 +134,30 @@ pub async fn transcribe_json(
             &state.models,
             &state.config,
             Path::new(&audio_path),
-            &language,
+            language.unwrap_or("auto"),
             vad,
-            punctuate,
             max_chunk_len,
         )
     })
     .await
     .unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
 
-    let status = if result.is_ok() { "ok" } else { "err" };
-    metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
-        .increment(1);
-    metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
-        .record(start.elapsed().as_secs_f64());
-
-    to_response(result)
+    observe(endpoint, result.is_ok(), start);
+    to_response(result).into_response()
 }
 
 pub async fn transcribe_upload(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> Json<TranscribeResponse> {
+) -> Response {
     let endpoint = "transcribe_upload";
     let start = std::time::Instant::now();
 
-    match parse_upload(&mut multipart, &state.config.upload_dir).await {
-        Ok(upload) => {
-            let language = upload.language;
-            let vad = upload.vad;
-            let punctuate = upload.punctuate;
-            let max_chunk_len = upload.max_chunk_len;
-            // The blocking job owns the file: if this handler is dropped (the
-            // client went away) the job still finishes, and the file goes with
-            // it — never before.
-            let file = upload.file;
-
-            let result = tokio::task::spawn_blocking(move || {
-                transcribe::transcribe(
-                    &state.models,
-                    &state.config,
-                    file.path(),
-                    &language,
-                    vad,
-                    punctuate,
-                    max_chunk_len,
-                )
-            })
-            .await
-            .unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
-
-            let status = if result.is_ok() { "ok" } else { "err" };
-            metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
-                .increment(1);
-            metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
-                .record(start.elapsed().as_secs_f64());
-            to_response(result)
-        }
+    let upload = match parse_upload(&mut multipart, &state.config.upload_dir).await {
+        Ok(u) => u,
         Err(msg) => {
-            metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
-                .increment(1);
-            metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
-                .record(start.elapsed().as_secs_f64());
-            Json(TranscribeResponse {
+            observe(endpoint, false, start);
+            return Json(TranscribeResponse {
                 text: String::new(),
                 chunks: Vec::new(),
                 duration_ms: 0.0,
@@ -194,17 +166,47 @@ pub async fn transcribe_upload(
                 confidence: None,
                 error: Some(msg),
             })
+            .into_response();
         }
-    }
+    };
+    let language = match language::resolve(&upload.language) {
+        Ok(l) => l,
+        Err(e) => {
+            observe(endpoint, false, start);
+            return e.into_response();
+        }
+    };
+    let vad = upload.vad;
+    let max_chunk_len = upload.max_chunk_len;
+    // The blocking job owns the file: if this handler is dropped (the
+    // client went away) the job still finishes, and the file goes with
+    // it — never before.
+    let file = upload.file;
+
+    let result = tokio::task::spawn_blocking(move || {
+        transcribe::transcribe(
+            &state.models,
+            &state.config,
+            file.path(),
+            language.unwrap_or("auto"),
+            vad,
+            max_chunk_len,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
+
+    observe(endpoint, result.is_ok(), start);
+    to_response(result).into_response()
 }
 
 pub(crate) struct UploadData {
     /// The uploaded audio; removed when the upload is dropped.
     pub file: TempFile,
+    /// The language hint as sent; see [`language::resolve`].
     pub language: String,
     pub vad: Option<bool>,
     pub max_chunk_len: usize,
-    pub punctuate: Option<bool>,
 }
 
 pub(crate) async fn parse_upload(
@@ -212,10 +214,9 @@ pub(crate) async fn parse_upload(
     dir: &Path,
 ) -> Result<UploadData, String> {
     let mut file: Option<TempFile> = None;
-    let mut language = "en".to_string();
+    let mut language = String::new();
     let mut vad: Option<bool> = None;
     let mut max_chunk_len: usize = 0;
-    let mut punctuate: Option<bool> = None;
 
     while let Some(field) = next_part(multipart).await? {
         let name = field.name().unwrap_or("").to_string();
@@ -224,17 +225,15 @@ pub(crate) async fn parse_upload(
             "language" => language = text_part(field).await?,
             "vad" => vad = parse_bool(&text_part(field).await?),
             "max_chunk_len" => max_chunk_len = text_part(field).await?.parse().unwrap_or(0),
-            "punctuate" => punctuate = parse_bool(&text_part(field).await?),
             _ => {}
         }
     }
 
     Ok(UploadData {
         file: file.ok_or("missing 'file' or 'audio' field")?,
-        language: normalize_language(&language),
+        language,
         vad,
         max_chunk_len,
-        punctuate,
     })
 }
 
@@ -278,14 +277,5 @@ fn parse_bool(s: &str) -> Option<bool> {
         "true" | "1" => Some(true),
         "false" | "0" => Some(false),
         _ => None,
-    }
-}
-
-fn normalize_language(lang: &str) -> String {
-    let normalized = lang.trim().to_lowercase();
-    if normalized.is_empty() {
-        "en".to_string()
-    } else {
-        normalized
     }
 }

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.2](https://github.com/anatolykoptev/ox-whisper/compare/v0.8.1...v0.8.2) (2026-10-02)
+
+
+### Added
+
+* **stt:** route ru, en and European languages to Parakeet TDT v3 (stacked on [#54](https://github.com/anatolykoptev/ox-whisper/issues/54)) ([#52](https://github.com/anatolykoptev/ox-whisper/issues/52)) ([8d66620](https://github.com/anatolykoptev/ox-whisper/commit/8d66620d0d2855fd122bb2721c85440a8c0ff8e1))
+* **tts:** supervise the tts-server child process ([#47](https://github.com/anatolykoptev/ox-whisper/issues/47)) ([c5109fc](https://github.com/anatolykoptev/ox-whisper/commit/c5109fc947725d5dbe39e7303ed958b2ea45977f))
+
+
+### Fixed
+
+* **stt:** harden the shared VAD and recognizer pools ([d15312a](https://github.com/anatolykoptev/ox-whisper/commit/d15312a31522de70b7a8494a4eb27995218a5e6b))
+* **vad,pool:** stop empty transcripts; bound batch memory and pool waits ([25179d7](https://github.com/anatolykoptev/ox-whisper/commit/25179d7713943516ecdaf2b83b1796940b3b42ea))
+* **vad:** reset the shared detector before each request ([60f2298](https://github.com/anatolykoptev/ox-whisper/commit/60f229835a2d6fcad9a4d48f1d7e75366d8d7f01))
+* **vad:** use sherpa-onnx's 20 s max_speech_duration ([2b32b67](https://github.com/anatolykoptev/ox-whisper/commit/2b32b6797abe531fe82f9608368ae871a88ee40e))
+
 ## [0.8.1](https://github.com/anatolykoptev/ox-whisper/compare/v0.8.0...v0.8.1) (2026-07-13)
 
 

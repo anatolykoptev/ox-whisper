@@ -19,7 +19,7 @@ fmt:
 check: fmt lint test
 	@echo "All checks passed"
 
+# Run from the directory that holds the compose file that defines ox-whisper.
 deploy:
-	cd ~/deploy/krolik-server && \
 	docker compose build --no-cache ox-whisper && \
 	docker compose up -d --no-deps --force-recreate ox-whisper

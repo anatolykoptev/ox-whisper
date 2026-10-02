@@ -28,7 +28,6 @@ async fn connect_with(max_buffer_s: &'static str, query: &str) -> Client {
     let state = Arc::new(AppState {
         models: Models::empty(),
         config,
-        tts: None,
     });
     let app = Router::new()
         .route("/v1/listen", get(super::ws_listen))

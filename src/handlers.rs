@@ -12,7 +12,6 @@ use crate::recognizer::PARAKEET_MODEL_NAME;
 use crate::routing::Engine;
 use crate::tmpfile::TempFile;
 use crate::transcribe;
-use crate::tts::{TtsState, TtsSupervisor};
 use crate::upload::{next_part, store_audio_part, text_part};
 
 /// Languages `/health` has always reported for the Moonshine route.
@@ -21,8 +20,6 @@ const MOONSHINE_LANGS: &[&str] = &["ar", "en", "es", "ja", "uk", "vi", "zh"];
 pub struct AppState {
     pub models: Models,
     pub config: Config,
-    /// TTS child supervisor — `None` when `TTS_ENABLED` is false.
-    pub tts: Option<Arc<TtsSupervisor>>,
 }
 
 #[derive(Serialize)]
@@ -33,15 +30,6 @@ pub struct HealthResponse {
     vad: bool,
     punctuation: bool,
     languages: HashMap<&'static str, LanguageInfo>,
-    tts: TtsHealth,
-}
-
-/// TTS status in `/health`. The endpoint always answers 200 — a TTS problem
-/// must never restart the whole container via the healthcheck.
-#[derive(Serialize)]
-struct TtsHealth {
-    enabled: bool,
-    state: TtsState,
 }
 
 #[derive(Serialize)]
@@ -72,17 +60,6 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         languages.insert(lang, LanguageInfo { model, ready });
     }
 
-    let tts = match &state.tts {
-        Some(sup) => TtsHealth {
-            enabled: true,
-            state: sup.state(),
-        },
-        None => TtsHealth {
-            enabled: false,
-            state: TtsState::Disabled,
-        },
-    };
-
     Json(HealthResponse {
         status: "ok",
         engine: "sherpa-onnx",
@@ -90,7 +67,6 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         vad: state.models.vad.is_some(),
         punctuation: state.models.punct.is_some(),
         languages,
-        tts,
     })
 }
 

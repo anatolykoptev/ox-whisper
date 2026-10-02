@@ -10,8 +10,10 @@ use crate::config::Config;
 use crate::models::Models;
 use crate::recognizer::PARAKEET_MODEL_NAME;
 use crate::routing::Engine;
+use crate::tmpfile::TempFile;
 use crate::transcribe;
 use crate::tts::{TtsState, TtsSupervisor};
+use crate::upload::{next_part, store_audio_part, text_part};
 
 /// Languages `/health` has always reported for the Moonshine route.
 const MOONSHINE_LANGS: &[&str] = &["ar", "en", "es", "ja", "uk", "vi", "zh"];
@@ -170,20 +172,22 @@ pub async fn transcribe_upload(
     let endpoint = "transcribe_upload";
     let start = std::time::Instant::now();
 
-    match parse_upload(&mut multipart).await {
+    match parse_upload(&mut multipart, &state.config.upload_dir).await {
         Ok(upload) => {
-            let path = upload.file_path;
             let language = upload.language;
             let vad = upload.vad;
             let punctuate = upload.punctuate;
             let max_chunk_len = upload.max_chunk_len;
-            let p = path.clone();
+            // The blocking job owns the file: if this handler is dropped (the
+            // client went away) the job still finishes, and the file goes with
+            // it — never before.
+            let file = upload.file;
 
             let result = tokio::task::spawn_blocking(move || {
                 transcribe::transcribe(
                     &state.models,
                     &state.config,
-                    &p,
+                    file.path(),
                     &language,
                     vad,
                     punctuate,
@@ -193,7 +197,6 @@ pub async fn transcribe_upload(
             .await
             .unwrap_or_else(|_| Err(transcribe::TranscribeError::NoRecognizer));
 
-            let _ = std::fs::remove_file(&path);
             let status = if result.is_ok() { "ok" } else { "err" };
             metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
                 .increment(1);
@@ -220,49 +223,38 @@ pub async fn transcribe_upload(
 }
 
 pub(crate) struct UploadData {
-    pub file_path: std::path::PathBuf,
+    /// The uploaded audio; removed when the upload is dropped.
+    pub file: TempFile,
     pub language: String,
     pub vad: Option<bool>,
     pub max_chunk_len: usize,
     pub punctuate: Option<bool>,
 }
 
-pub(crate) async fn parse_upload(multipart: &mut Multipart) -> Result<UploadData, String> {
-    let mut file_path: Option<std::path::PathBuf> = None;
+pub(crate) async fn parse_upload(
+    multipart: &mut Multipart,
+    dir: &Path,
+) -> Result<UploadData, String> {
+    let mut file: Option<TempFile> = None;
     let mut language = "en".to_string();
     let mut vad: Option<bool> = None;
     let mut max_chunk_len: usize = 0;
     let mut punctuate: Option<bool> = None;
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    while let Some(field) = next_part(multipart).await? {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
-            "file" | "audio" => {
-                let ext = field
-                    .file_name()
-                    .and_then(|n| {
-                        Path::new(n)
-                            .extension()
-                            .map(|e| e.to_string_lossy().to_string())
-                    })
-                    .unwrap_or_else(|| "wav".to_string());
-                let tmp = format!("/tmp/{}.{}", uuid::Uuid::new_v4(), ext);
-                let data = field.bytes().await.map_err(|e| e.to_string())?;
-                std::fs::write(&tmp, &data).map_err(|e: std::io::Error| e.to_string())?;
-                file_path = Some(std::path::PathBuf::from(tmp));
-            }
-            "language" => language = field.text().await.unwrap_or_default(),
-            "vad" => vad = parse_bool(&field.text().await.unwrap_or_default()),
-            "max_chunk_len" => {
-                max_chunk_len = field.text().await.unwrap_or_default().parse().unwrap_or(0)
-            }
-            "punctuate" => punctuate = parse_bool(&field.text().await.unwrap_or_default()),
+            "file" | "audio" => store_audio_part(field, dir, &mut file).await?,
+            "language" => language = text_part(field).await?,
+            "vad" => vad = parse_bool(&text_part(field).await?),
+            "max_chunk_len" => max_chunk_len = text_part(field).await?.parse().unwrap_or(0),
+            "punctuate" => punctuate = parse_bool(&text_part(field).await?),
             _ => {}
         }
     }
 
     Ok(UploadData {
-        file_path: file_path.ok_or("missing 'file' or 'audio' field")?,
+        file: file.ok_or("missing 'file' or 'audio' field")?,
         language: normalize_language(&language),
         vad,
         max_chunk_len,

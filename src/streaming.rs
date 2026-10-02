@@ -32,13 +32,9 @@ pub fn transcribe_streaming(
     tx: tokio::sync::mpsc::Sender<StreamEvent>,
 ) -> Result<TranscribeResult, TranscribeError> {
     let start = Instant::now();
-    let (wav_path, needs_cleanup) = ensure_wav(audio_path)?;
+    let wav = ensure_wav(audio_path, &config.upload_dir)?;
 
-    let result = do_transcribe_streaming(models, config, &wav_path, language, vad_override, &tx);
-
-    if needs_cleanup {
-        let _ = std::fs::remove_file(&wav_path);
-    }
+    let result = do_transcribe_streaming(models, config, wav.path(), language, vad_override, &tx);
 
     let mut res = result?;
     res.duration_ms = start.elapsed().as_secs_f64() * 1000.0;

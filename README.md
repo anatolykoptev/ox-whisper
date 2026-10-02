@@ -217,6 +217,7 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | `MOONSHINE_THREADS` | `4` | ONNX inference threads |
 | `POOL_SIZE` | `2` | Recognizer instances per language |
 | `MAX_AUDIO_DURATION_S` | `0` | Max input length, `0`=unlimited |
+| `WS_MAX_BUFFER_S` | `120` | Longest audio a WebSocket session may buffer; past it the client gets an `Error` frame and the connection closes (also capped by `MAX_AUDIO_DURATION_S` when set) |
 | `VAD_MIN_DURATION_S` | `10` | Auto-enable VAD above this length |
 | `OXWHISPER_PROM_PORT` | `9092` | Prometheus metrics port |
 
@@ -231,7 +232,7 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | `PARAKEET_DIR` | `/parakeet-models` |
 | `PARAKEET_LANGS` | all 25 Parakeet v3 languages; `off` disables Parakeet |
 | `PARAKEET_POOL_SIZE` | `POOL_SIZE` |
-| `PARAKEET_IDLE_EVICT_SECS` | `OX_WHISPER_IDLE_EVICT_SECS` — set `0` to keep Parakeet resident (recommended) |
+| `PARAKEET_IDLE_EVICT_SECS` | `0` — keep Parakeet resident (recommended); it does not inherit `OX_WHISPER_IDLE_EVICT_SECS` |
 | `SILERO_VAD_MODEL` | `/vad/silero_vad.onnx` |
 | `PUNCT_MODEL` | `/punct/model.int8.onnx` |
 | `PUNCT_VOCAB` | `/punct/bpe.vocab` |
@@ -283,7 +284,7 @@ scrape_configs:
 | `oxwhisper_audio_duration_seconds` | histogram | — |
 | `oxwhisper_vad_speech_ratio` | gauge | `lang` |
 | `oxwhisper_chunks_total` | counter | `lang` |
-| `oxwhisper_vad_no_speech_total` | counter | `caller` (`batch`, `sse`, `ws`; on `ws` it also counts checks before speech starts) |
+| `oxwhisper_vad_no_speech_total` | counter | `caller` (`batch`, `sse`; `ws_poll` is the per-frame WebSocket check, where silence is normal, so do not alert on it) |
 | `oxwhisper_vad_mutex_poisoned_total` | counter | — |
 | `oxwhisper_pool_acquire_wait_seconds` | histogram | — |
 | `oxwhisper_pool_acquire_timeouts_total` | counter | — |
@@ -291,6 +292,8 @@ scrape_configs:
 | `oxwhisper_hallucination_rejected_total` | counter | `lang` |
 | `oxwhisper_recognizer_pool_size` · `_busy` | gauge | `lang` |
 | `oxwhisper_ws_active_connections` | gauge | — |
+| `oxwhisper_ws_buffer_limit_total` | counter | — (sessions closed at `WS_MAX_BUFFER_S`, with a 1009 Close frame) |
+| `oxwhisper_ws_interim_skipped_total` | counter | — (interim decodes that could not run; nothing is sent for them) |
 
 ---
 

@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::Response;
 
 use crate::chunking::sanitize_utf8;
 use crate::handlers::AppState;
-use crate::transcribe::{maybe_punctuate, split_audio_chunks, transcribe_routed};
+use crate::transcribe::{TranscribeError, maybe_punctuate, split_audio_chunks, transcribe_routed};
 use crate::words::{WordTimestamp, compute_chunk_offsets};
 use crate::ws_session::WsSession;
 use crate::ws_types::{ClientMessage, ServerMessage, WsParams};
@@ -56,7 +56,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
         return;
     }
 
-    let mut session = WsSession::new(params.sample_rate);
+    let mut session = WsSession::new(params.sample_rate, state.config.ws_max_buffer_samples());
 
     loop {
         let msg = match socket.recv().await {
@@ -70,7 +70,18 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
 
         match msg {
             Message::Binary(data) => {
-                session.push_audio(&data, &params.encoding);
+                if let Err(full) = session.push_audio(&data, &params.encoding) {
+                    metrics::counter!(crate::metrics::names::WS_BUFFER_LIMIT).increment(1);
+                    let _ = send_msg(
+                        &mut socket,
+                        &ServerMessage::Error {
+                            message: full.to_string(),
+                        },
+                    )
+                    .await;
+                    close_too_big(&mut socket).await;
+                    break;
+                }
 
                 // VAD check if enabled
                 if params.vad {
@@ -128,6 +139,29 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
     }
 }
 
+/// Closes the socket properly after a buffer overrun: a Close frame with 1009
+/// (message too big), then a short bounded wait for the client's reply while
+/// reading and discarding what it still sends. Dropping the socket with
+/// unread inbound frames makes the kernel send a reset, and the client can
+/// lose the Error frame that explains the close.
+async fn close_too_big(socket: &mut WebSocket) {
+    let frame = CloseFrame {
+        code: close_code::SIZE,
+        reason: "audio buffer limit reached".into(),
+    };
+    if socket.send(Message::Close(Some(frame))).await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(Ok(msg)) = socket.recv().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
 /// Transcribe the buffer and return a final Results message.
 async fn do_transcribe(
     state: &Arc<AppState>,
@@ -139,9 +173,11 @@ async fn do_transcribe(
     if samples.is_empty() {
         return None;
     }
-    let (text, words) =
-        transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
-    Some(session.store_final(text, words, from_finalize))
+    match transcribe_buffer(state, samples, &params.language, params.punctuate).await {
+        Ok(Some((text, words))) => Some(session.store_final(text, words, from_finalize)),
+        Ok(None) => None,
+        Err(e) => Some(buffer_error(&e)),
+    }
 }
 
 /// Transcribe a copy of the buffer for interim results (non-destructive peek).
@@ -154,18 +190,38 @@ async fn do_transcribe_interim(
     if samples.is_empty() {
         return None;
     }
-    let (text, words) =
-        transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
-    Some(session.interim_result(text, words))
+    match transcribe_buffer(state, samples, &params.language, params.punctuate).await {
+        Ok(Some((text, words))) => Some(session.interim_result(text, words)),
+        Ok(None) => None,
+        // An interim decode works on a peeked copy, so a failure loses nothing,
+        // and the next interval tries again: with a busy slot an Error every
+        // 2 s would be noise. Count it and skip.
+        Err(e) => {
+            tracing::debug!("WS interim decode skipped: {e}");
+            metrics::counter!(crate::metrics::names::WS_INTERIM_SKIPPED).increment(1);
+            None
+        }
+    }
 }
 
-/// Run transcription on samples via spawn_blocking.
+/// A *final* decode that failed (no free recognizer, a failed reload) is told
+/// to the client: its audio was taken out of the buffer, so silence would lose
+/// it. Interim decodes, which work on a copy, skip instead.
+fn buffer_error(e: &TranscribeError) -> ServerMessage {
+    tracing::warn!("WS transcription failed: {e}");
+    ServerMessage::Error {
+        message: e.to_string(),
+    }
+}
+
+/// Run transcription on samples via spawn_blocking. `Ok(None)` is audio that
+/// decoded to no text; `Err` is a decode that could not run.
 async fn transcribe_buffer(
     state: &Arc<AppState>,
     samples: Vec<f32>,
     language: &str,
     punctuate: bool,
-) -> Option<(String, Vec<WordTimestamp>)> {
+) -> Result<Option<(String, Vec<WordTimestamp>)>, TranscribeError> {
     let models = state.clone();
     let lang = language.to_string();
     let punct = punctuate;
@@ -173,10 +229,10 @@ async fn transcribe_buffer(
     tokio::task::spawn_blocking(move || {
         let config = &models.config;
         let engine = models.models.route(&lang, &config.parakeet_langs);
-        // The session buffer is not capped, so decode it in bounded chunks
-        // (and bounded batches) like the batch endpoint — never as one call,
-        // which on Parakeet's full-attention encoder grows memory with the
-        // square of the stream length and pins the slot.
+        // Decode in bounded chunks (and bounded batches) like the batch
+        // endpoint — never as one call, which on Parakeet's full-attention
+        // encoder grows memory with the square of the buffer length and pins
+        // the slot. The buffer itself is capped by WS_MAX_BUFFER_S.
         let chunks = split_audio_chunks(samples, config.max_chunk_s * 16000);
         let offsets = compute_chunk_offsets(&chunks, 16000);
         let (engine, texts, words) = transcribe_routed(
@@ -187,21 +243,20 @@ async fn transcribe_buffer(
             &chunks,
             &offsets,
             config.hallucination_threshold,
-        )
-        .ok()?;
+        )?;
         let text = sanitize_utf8(texts.join(" ").trim());
         if text.is_empty() {
-            return None;
+            return Ok(None);
         }
         let text = if punct {
             maybe_punctuate(&models.models, &text, &lang, engine, Some(true))
         } else {
             text
         };
-        Some((text, words))
+        Ok(Some((text, words)))
     })
     .await
-    .ok()?
+    .unwrap_or(Err(TranscribeError::NoRecognizer))
 }
 
 async fn send_msg(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), ()> {
@@ -211,3 +266,7 @@ async fn send_msg(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), ()>
         .await
         .map_err(|_| ())
 }
+
+#[cfg(test)]
+#[path = "ws_tests.rs"]
+mod tests;

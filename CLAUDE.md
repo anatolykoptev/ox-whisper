@@ -11,12 +11,12 @@
 | `src/handlers.rs` · `src/handler_openai.rs` | `/health`; the OpenAI-compatible transcription endpoint |
 | `src/ws_handler.rs` · `src/ws_session.rs` | WebSocket streaming |
 | `src/language.rs` | The language hint: validated against Parakeet's 25 languages, else 400 |
-| `src/transcribe.rs` | Transcription engine: VAD or chunk split, bounded batch decode |
+| `src/transcribe.rs` | Transcription engine: `plan_chunks` (contiguous audio, no VAD), bounded batch decode |
 | `src/models.rs` | Loads Parakeet + VAD; refuses to start without Parakeet |
 | `src/pool.rs` | Recognizer pool: bounded-wait `acquire`, opt-in idle eviction, `is_healthy` |
-| `src/vad.rs` | Shared Silero VAD (reset per request, poison recovery) |
+| `src/vad.rs` | Shared Silero VAD, used only by WebSocket speech detection (reset per request, poison recovery) |
 | `src/tmpfile.rs` | `TempFile`: owns an upload / ffmpeg temp file, removes it on drop |
-| `src/chunking.rs` | Text helpers (`sanitize_utf8`); the audio split `split_audio_chunks` is in `transcribe.rs` |
+| `src/chunking.rs` | `chunk_bounds` / `split_at_quiet` (cut at quiet points, never drop or pad); text helper `sanitize_utf8` |
 | `src/audio.rs` | Audio format conversion (ffmpeg) |
 | `src/smart_format/` · `pii.rs` · `paragraphs.rs` · `spelling.rs` | Post-processing options (pure text transforms) |
 | `vendor/sherpa-rs/` | Vendored sherpa-onnx Rust bindings |

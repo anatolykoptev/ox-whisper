@@ -8,7 +8,7 @@ use crate::chunking::sanitize_utf8;
 use crate::handlers::AppState;
 use crate::language;
 use crate::models::PARAKEET_MODEL_NAME;
-use crate::transcribe::{TranscribeError, split_audio_chunks, transcribe_chunks};
+use crate::transcribe::{TranscribeError, plan_chunks, transcribe_chunks};
 use crate::words::{WordTimestamp, compute_chunk_offsets};
 use crate::ws_session::WsSession;
 use crate::ws_types::{ClientMessage, ServerMessage, WsParams};
@@ -243,7 +243,7 @@ async fn transcribe_buffer(
         // endpoint — never as one call, which on Parakeet's full-attention
         // encoder grows memory with the square of the buffer length and pins
         // the slot. The buffer itself is capped by WS_MAX_BUFFER_S.
-        let chunks = split_audio_chunks(samples, config.max_chunk_s * 16000);
+        let chunks = plan_chunks(samples, config);
         let offsets = compute_chunk_offsets(&chunks, 16000);
         let (texts, words) = transcribe_chunks(
             &models.models,

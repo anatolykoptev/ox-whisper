@@ -8,10 +8,9 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
 use crate::audio::{AudioError, ensure_wav, load_wav};
-use crate::chunking::sanitize_utf8;
+use crate::chunking::{sanitize_utf8, split_at_quiet};
 use crate::config::Config;
 use crate::models::{Models, PARAKEET_POOL_LABEL};
-use crate::vad::{apply_vad, lock_vad};
 use crate::words::{
     WordTimestamp, compute_chunk_offsets, estimate_words_from_text, extract_words_with_confidence,
 };
@@ -83,13 +82,12 @@ pub fn transcribe(
     config: &Config,
     audio_path: &Path,
     lang: &str,
-    vad_override: Option<bool>,
 ) -> Result<TranscribeResult, TranscribeError> {
     let start = Instant::now();
     #[cfg(test)]
     probe::enter(audio_path, config.decode_delay);
     let wav = ensure_wav(audio_path, &config.upload_dir)?;
-    let result = do_transcribe(models, config, wav.path(), lang, vad_override);
+    let result = do_transcribe(models, config, wav.path(), lang);
     let elapsed = start.elapsed().as_secs_f64();
     metrics::histogram!(names::TRANSCRIBE_DURATION, "lang" => lang.to_string()).record(elapsed);
     let mut res = result?;
@@ -102,7 +100,6 @@ fn do_transcribe(
     config: &Config,
     wav_path: &Path,
     lang: &str,
-    vad_override: Option<bool>,
 ) -> Result<TranscribeResult, TranscribeError> {
     let (samples, duration) = load_wav(wav_path)?;
     if config.max_audio_duration_s > 0.0 && duration > config.max_audio_duration_s {
@@ -113,47 +110,12 @@ fn do_transcribe(
     }
     metrics::histogram!(names::AUDIO_DURATION).record(duration);
 
-    let use_vad =
-        vad_override.unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
-
-    let max_chunk_samples = config.max_chunk_s * 16000;
-    let audio_chunks = if use_vad {
-        if let Some(ref vad_mutex) = models.vad {
-            let mut vad = lock_vad(vad_mutex);
-            let vad_result = apply_vad(
-                &mut vad,
-                &samples,
-                16000,
-                config.vad_speech_pad_s,
-                config.vad_max_chunk_s,
-                "batch",
-            );
-            let total_ms = duration * 1000.0;
-            let pct = if total_ms > 0.0 {
-                100.0 * vad_result.speech_ms / total_ms
-            } else {
-                0.0
-            };
-            tracing::info!(
-                "VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} segment(s), {} chunk(s)",
-                vad_result.speech_ms,
-                total_ms,
-                pct,
-                vad_result.segments,
-                vad_result.chunks.len()
-            );
-            let ratio = vad_result.speech_ms / total_ms.max(1.0);
-            let chunks_count = vad_result.chunks.len();
-            metrics::gauge!(names::VAD_SPEECH_RATIO, "lang" => lang.to_string()).set(ratio);
-            metrics::counter!(names::CHUNKS_TOTAL, "lang" => lang.to_string())
-                .increment(chunks_count as u64);
-            vad_result.chunks
-        } else {
-            split_audio_chunks(samples, max_chunk_samples)
-        }
-    } else {
-        split_audio_chunks(samples, max_chunk_samples)
-    };
+    // Contiguous original audio, cut only at quiet points: nothing is dropped,
+    // nothing is inserted. Speech detection (VAD) trimmed late onsets off quiet
+    // clips and padded segments with digital zeros, which cost 1-4 WER points.
+    let audio_chunks = plan_chunks(samples, config);
+    metrics::counter!(names::CHUNKS_TOTAL, "lang" => lang.to_string())
+        .increment(audio_chunks.len() as u64);
 
     let chunk_offsets = compute_chunk_offsets(&audio_chunks, 16000);
     let (texts, words) = transcribe_chunks(
@@ -173,6 +135,13 @@ fn do_transcribe(
         audio_duration_ms: duration * 1000.0,
         words,
     })
+}
+
+/// The chunks one decode is made of: the contiguous original audio, cut only at
+/// quiet points. Shared by the batch endpoint and the WebSocket final decode so
+/// neither drops, trims or pads audio.
+pub(crate) fn plan_chunks(samples: Vec<f32>, config: &Config) -> Vec<Vec<f32>> {
+    split_at_quiet(samples, config.max_chunk_samples())
 }
 
 /// Batch-decodes `chunks` on the Parakeet pool, in bounded groups.
@@ -234,7 +203,7 @@ pub(crate) fn transcribe_chunks(
 /// Chunks decoded together in one `transcribe_batch` call. Batch decoding
 /// pads every chunk to the longest and keeps all activations alive at once,
 /// so one call over a whole file grows memory with the file's length; with
-/// `VAD_MAX_CHUNK_S=20` this bounds a call to about 80 s of audio.
+/// `MAX_CHUNK_S=30` this bounds a call to about 120 s of audio.
 pub(crate) const DECODE_BATCH_CHUNKS: usize = 4;
 
 /// Runs `decode` over `chunks` in groups of at most `batch`, preserving order.
@@ -249,16 +218,6 @@ pub(crate) fn decode_in_batches<R>(
         out.extend(decode(&refs));
     }
     out
-}
-
-pub(crate) fn split_audio_chunks(samples: Vec<f32>, max_chunk_samples: usize) -> Vec<Vec<f32>> {
-    if max_chunk_samples == 0 || samples.len() <= max_chunk_samples {
-        return vec![samples];
-    }
-    samples
-        .chunks(max_chunk_samples)
-        .map(|c| c.to_vec())
-        .collect()
 }
 
 pub(crate) fn compression_ratio(text: &str) -> f64 {
@@ -287,5 +246,39 @@ mod tests {
         assert_eq!(out, (0..10).collect::<Vec<_>>());
         assert!(sizes.iter().all(|&n| n <= DECODE_BATCH_CHUNKS), "{sizes:?}");
         assert_eq!(sizes.len(), 10usize.div_ceil(DECODE_BATCH_CHUNKS));
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    /// The chunk list both decode paths build. A clip whose first 3 s sit at
+    /// about -80 dBFS (Silero starts such a segment seconds late, and the old
+    /// path then dropped the head) must reach the model whole: no sample dropped,
+    /// no zeros inserted, every chunk within the window.
+    #[test]
+    fn the_decode_path_neither_drops_nor_pads_a_quiet_onset() {
+        let config = Config::from_lookup(&|_| None);
+        let mut x: Vec<f32> = (0..16000 * 70)
+            .map(|i| 0.3 * ((i as f32) * 0.21).sin())
+            .collect();
+        for s in &mut x[..16000 * 3] {
+            *s *= 0.0001;
+        }
+        let chunks = plan_chunks(x.clone(), &config);
+        assert!(chunks.len() >= 3);
+        assert!(chunks.iter().all(|c| c.len() <= config.max_chunk_samples()));
+        let back: Vec<f32> = chunks.iter().flatten().copied().collect();
+        assert_eq!(back.len(), x.len(), "samples dropped or inserted");
+        assert!(back.iter().zip(&x).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert_eq!(back[..16000 * 3], x[..16000 * 3]);
+    }
+
+    #[test]
+    fn audio_up_to_the_window_decodes_in_one_piece() {
+        let config = Config::from_lookup(&|_| None);
+        let chunks = plan_chunks(vec![0.1; config.max_chunk_samples()], &config);
+        assert_eq!(chunks.len(), 1);
     }
 }

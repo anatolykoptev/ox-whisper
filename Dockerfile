@@ -146,6 +146,7 @@ COPY --from=builder /binary /usr/local/bin/ox-whisper
 ENV MOONSHINE_PORT=8092
 ENV MOONSHINE_MODELS_DIR=/models
 ENV ZIPFORMER_RU_DIR=/ru-models
+ENV PARAKEET_DIR=/parakeet-models
 ENV SILERO_VAD_MODEL=/vad/silero_vad.onnx
 ENV PUNCT_MODEL=/punct/model.int8.onnx
 ENV PUNCT_VOCAB=/punct/bpe.vocab

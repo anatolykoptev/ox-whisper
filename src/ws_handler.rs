@@ -4,9 +4,10 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::Response;
 
+use crate::chunking::sanitize_utf8;
 use crate::handlers::AppState;
-use crate::transcribe::{compression_ratio, maybe_punctuate};
-use crate::words::{WordTimestamp, estimate_words_from_text, extract_words_with_confidence};
+use crate::transcribe::{maybe_punctuate, split_audio_chunks, transcribe_routed};
+use crate::words::{WordTimestamp, compute_chunk_offsets};
 use crate::ws_session::WsSession;
 use crate::ws_types::{ClientMessage, ServerMessage, WsParams};
 
@@ -170,14 +171,30 @@ async fn transcribe_buffer(
     let punct = punctuate;
 
     tokio::task::spawn_blocking(move || {
-        let threshold = models.config.hallucination_threshold;
-        let (text, words) = if lang == "ru" {
-            transcribe_with_pool_ru(&models.models, &samples, threshold)?
-        } else {
-            transcribe_with_pool_en(&models.models, &samples, &lang, threshold)?
-        };
+        let config = &models.config;
+        let engine = models.models.route(&lang, &config.parakeet_langs);
+        // The session buffer is not capped, so decode it in bounded chunks
+        // (and bounded batches) like the batch endpoint — never as one call,
+        // which on Parakeet's full-attention encoder grows memory with the
+        // square of the stream length and pins the slot.
+        let chunks = split_audio_chunks(samples, config.max_chunk_s * 16000);
+        let offsets = compute_chunk_offsets(&chunks, 16000);
+        let (engine, texts, words) = transcribe_routed(
+            &models.models,
+            config,
+            engine,
+            &lang,
+            &chunks,
+            &offsets,
+            config.hallucination_threshold,
+        )
+        .ok()?;
+        let text = sanitize_utf8(texts.join(" ").trim());
+        if text.is_empty() {
+            return None;
+        }
         let text = if punct {
-            maybe_punctuate(&models.models, &text, &lang, Some(true))
+            maybe_punctuate(&models.models, &text, &lang, engine, Some(true))
         } else {
             text
         };
@@ -185,75 +202,6 @@ async fn transcribe_buffer(
     })
     .await
     .ok()?
-}
-
-fn transcribe_with_pool_en(
-    models: &crate::models::Models,
-    samples: &[f32],
-    _language: &str,
-    threshold: f64,
-) -> Option<(String, Vec<WordTimestamp>)> {
-    let pool = models.en.as_ref()?;
-    let mut rec = pool.acquire().ok()?;
-    metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "en").increment(1.0);
-    struct EnBusyGuard;
-    impl Drop for EnBusyGuard {
-        fn drop(&mut self) {
-            metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "en").decrement(1.0);
-        }
-    }
-    let _busy = EnBusyGuard;
-    let result = rec.transcribe(16000, samples);
-    let text = result.text.trim().to_string();
-    if text.is_empty() || compression_ratio(&text) > threshold {
-        return None;
-    }
-    let mut words = Vec::new();
-    extract_words_with_confidence(
-        &result.tokens,
-        &result.timestamps,
-        &result.log_probs,
-        0.0,
-        &mut words,
-    );
-    if words.is_empty() && !text.is_empty() {
-        words = estimate_words_from_text(&text, samples.len() as f32 / 16000.0, 0.0);
-    }
-    Some((text, words))
-}
-
-fn transcribe_with_pool_ru(
-    models: &crate::models::Models,
-    samples: &[f32],
-    threshold: f64,
-) -> Option<(String, Vec<WordTimestamp>)> {
-    let pool = models.ru.as_ref()?;
-    let mut rec = pool.acquire().ok()?;
-    metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "ru").increment(1.0);
-    struct RuBusyGuard;
-    impl Drop for RuBusyGuard {
-        fn drop(&mut self) {
-            metrics::gauge!(crate::metrics::names::POOL_BUSY, "lang" => "ru").decrement(1.0);
-        }
-    }
-    let _busy = RuBusyGuard;
-    let result = rec.transcribe(16000, samples);
-    let text = result.text.trim().to_string();
-    if text.is_empty() || compression_ratio(&text) > threshold {
-        return None;
-    }
-    let mut words = Vec::new();
-    extract_words_with_confidence(
-        &result.tokens,
-        &result.timestamps,
-        &result.log_probs,
-        0.0,
-        &mut words,
-    );
-    if words.is_empty() && !text.is_empty() {
-        words = estimate_words_from_text(&text, samples.len() as f32 / 16000.0, 0.0);
-    }
-    Some((text, words))
 }
 
 async fn send_msg(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), ()> {

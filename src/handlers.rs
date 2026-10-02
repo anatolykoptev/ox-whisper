@@ -8,8 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::models::Models;
+use crate::recognizer::PARAKEET_MODEL_NAME;
+use crate::routing::Engine;
 use crate::transcribe;
 use crate::tts::{TtsState, TtsSupervisor};
+
+/// Languages `/health` has always reported for the Moonshine route.
+const MOONSHINE_LANGS: &[&str] = &["ar", "en", "es", "ja", "uk", "vi", "zh"];
 
 pub struct AppState {
     pub models: Models,
@@ -45,26 +50,25 @@ struct LanguageInfo {
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let mut languages = HashMap::new();
-    let en_ready = state.models.en.is_some();
-    for lang in ["ar", "en", "es", "ja", "uk", "vi", "zh"] {
-        languages.insert(
-            lang,
-            LanguageInfo {
-                model: "moonshine-v2-base",
-                ready: en_ready,
-            },
-        );
+    let langs = ["ar", "en", "es", "ja", "uk", "vi", "zh", "ru"]
+        .into_iter()
+        .chain(crate::config::PARAKEET_V3_LANGS.iter().copied());
+    for lang in langs {
+        if languages.contains_key(lang) {
+            continue;
+        }
+        let engine = state.models.route(lang, &state.config.parakeet_langs);
+        let (model, ready) = match engine {
+            Engine::Parakeet => (PARAKEET_MODEL_NAME, true),
+            // Read at load time: taking a pool slot here would make every
+            // healthcheck compete with requests and block idle eviction.
+            Engine::Ru => (state.models.ru_model_name, state.models.ru.is_some()),
+            // Moonshine is listed only for the languages it always claimed.
+            Engine::Moonshine if !MOONSHINE_LANGS.contains(&lang) => continue,
+            Engine::Moonshine => ("moonshine-v2-base", state.models.en.is_some()),
+        };
+        languages.insert(lang, LanguageInfo { model, ready });
     }
-    // Read at load time: taking a pool slot here would make every healthcheck
-    // compete with requests and keep the model from ever being evicted.
-    let ru_model = state.models.ru_model_name;
-    languages.insert(
-        "ru",
-        LanguageInfo {
-            model: ru_model,
-            ready: state.models.ru.is_some(),
-        },
-    );
 
     let tts = match &state.tts {
         Some(sup) => TtsHealth {

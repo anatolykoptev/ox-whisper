@@ -12,6 +12,8 @@ use crate::chunking::{sanitize_utf8, split_text};
 use crate::config::Config;
 use crate::models::Models;
 use crate::punctuate::add_punctuation;
+use crate::recognizer::RuRecognizer;
+use crate::routing::Engine;
 use crate::vad::{apply_vad, lock_vad};
 use crate::words::{
     WordTimestamp, compute_chunk_offsets, estimate_words_from_text, extract_words_with_confidence,
@@ -45,6 +47,8 @@ pub enum TranscribeError {
     TooLong(f64, f64),
     #[error("no recognizer available")]
     NoRecognizer,
+    #[error("{0} model failed to reload after idle eviction and no fallback model is loaded")]
+    ReloadFailed(&'static str),
 }
 
 pub struct TranscribeResult {
@@ -104,6 +108,7 @@ fn do_transcribe(
     }
     metrics::histogram!(names::AUDIO_DURATION).record(duration);
 
+    let engine = models.route(language, &config.parakeet_langs);
     let use_vad =
         vad_override.unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
 
@@ -148,22 +153,27 @@ fn do_transcribe(
 
     let chunk_offsets = compute_chunk_offsets(&audio_chunks, 16000);
     let threshold = config.hallucination_threshold;
-    let (texts, words) = match language {
-        "ru" => transcribe_ru(models, &audio_chunks, &chunk_offsets, threshold)?,
-        _ => transcribe_en(models, &audio_chunks, language, &chunk_offsets, threshold)?,
-    };
+    let (engine, texts, words) = transcribe_routed(
+        models,
+        config,
+        engine,
+        language,
+        &audio_chunks,
+        &chunk_offsets,
+        threshold,
+    )?;
 
     let joined = texts.join(" ");
     let text = sanitize_utf8(joined.trim());
 
-    // Skip external punctuation for EN: Moonshine v2 produces punctuated text
-    // natively (tokens include , . etc). A RU model with built-in punctuation
-    // is handled inside maybe_punctuate, for every path.
-    let skip_punct = language != "ru";
+    // Skip external punctuation for Moonshine (punctuates natively) and
+    // Parakeet; RU output goes through maybe_punctuate, which skips a RU model
+    // with built-in punctuation.
+    let skip_punct = engine != Engine::Ru;
     let text = if skip_punct {
         text
     } else {
-        maybe_punctuate(models, &text, language, punctuate_override)
+        maybe_punctuate(models, &text, language, engine, punctuate_override)
     };
     let chunks = if max_chunk_len > 0 {
         split_text(&text, max_chunk_len)
@@ -179,6 +189,48 @@ fn do_transcribe(
         speech_ms,
         words,
     })
+}
+
+/// Transcribes `chunks` on `engine`. If Parakeet's slot was idle-evicted and
+/// fails to reload (e.g. out of memory), the request falls back to the model
+/// that would serve the language without Parakeet — Moonshine for `en`, the
+/// RU model for `ru` when one is loaded — instead of failing. Returns the
+/// engine that produced the text.
+pub(crate) fn transcribe_routed(
+    models: &Models,
+    config: &Config,
+    engine: Engine,
+    language: &str,
+    chunks: &[Vec<f32>],
+    chunk_offsets: &[f64],
+    threshold: f64,
+) -> Result<(Engine, Vec<String>, Vec<WordTimestamp>), TranscribeError> {
+    let run = |engine: Engine| match engine {
+        Engine::Parakeet | Engine::Ru => transcribe_offline(
+            models.offline_pool(engine),
+            engine,
+            language,
+            chunks,
+            chunk_offsets,
+            threshold,
+        ),
+        Engine::Moonshine => transcribe_en(models, chunks, language, chunk_offsets, threshold),
+    };
+    match run(engine) {
+        Err(TranscribeError::ReloadFailed(_)) if engine == Engine::Parakeet => {
+            let Some(fallback) = models.reload_fallback(language, &config.parakeet_langs) else {
+                return Err(TranscribeError::ReloadFailed(engine.label()));
+            };
+            tracing::warn!(
+                "Parakeet failed to reload; '{language}' falls back to {}",
+                fallback.label()
+            );
+            metrics::counter!(names::ROUTE_FALLBACK, "to" => fallback.label()).increment(1);
+            let (texts, words) = run(fallback)?;
+            Ok((fallback, texts, words))
+        }
+        other => other.map(|(t, w)| (engine, t, w)),
+    }
 }
 
 fn transcribe_en(
@@ -280,28 +332,32 @@ fn transcribe_en(
     Ok((texts, words))
 }
 
-fn transcribe_ru(
-    models: &Models,
+/// Batch-decodes `chunks` on an offline pool (Parakeet or RU).
+pub(crate) fn transcribe_offline(
+    pool: Option<&std::sync::Arc<crate::pool::EvictablePool<RuRecognizer>>>,
+    engine: Engine,
+    language: &str,
     chunks: &[Vec<f32>],
     chunk_offsets: &[f64],
     threshold: f64,
 ) -> Result<(Vec<String>, Vec<WordTimestamp>), TranscribeError> {
-    let pool = models
-        .ru
-        .as_ref()
-        .ok_or_else(|| TranscribeError::LanguageNotAvailable("ru".to_string()))?;
+    let label = engine.label();
+    let pool = pool.ok_or_else(|| TranscribeError::LanguageNotAvailable(language.to_string()))?;
     let mut rec = pool.acquire().map_err(|e| {
-        tracing::warn!("RU pool acquire failed: {e}");
-        TranscribeError::NoRecognizer
+        tracing::warn!("{label} pool acquire failed: {e}");
+        match e {
+            crate::pool::AcquireError::ReinitFailed(_) => TranscribeError::ReloadFailed(label),
+            crate::pool::AcquireError::AllBusy => TranscribeError::NoRecognizer,
+        }
     })?;
-    metrics::gauge!(names::POOL_BUSY, "lang" => "ru").increment(1.0);
-    struct RuBusyGuard;
-    impl Drop for RuBusyGuard {
+    metrics::gauge!(names::POOL_BUSY, "lang" => label).increment(1.0);
+    struct BusyGuard(&'static str);
+    impl Drop for BusyGuard {
         fn drop(&mut self) {
-            metrics::gauge!(names::POOL_BUSY, "lang" => "ru").decrement(1.0);
+            metrics::gauge!(names::POOL_BUSY, "lang" => self.0).decrement(1.0);
         }
     }
-    let _busy = RuBusyGuard;
+    let _busy = BusyGuard(label);
     let results = decode_in_batches(chunks, DECODE_BATCH_CHUNKS, |batch| {
         rec.transcribe_batch(16000, batch)
     });
@@ -314,7 +370,7 @@ fn transcribe_ru(
             continue;
         }
         if compression_ratio(&t) > threshold {
-            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => "ru").increment(1);
+            metrics::counter!(names::HALLUCINATION_REJECTED, "lang" => label).increment(1);
             continue;
         }
         let offset = chunk_offsets.get(i).copied().unwrap_or(0.0) as f32;
@@ -338,10 +394,12 @@ pub(crate) fn maybe_punctuate(
     models: &Models,
     text: &str,
     language: &str,
+    engine: Engine,
     punctuate_override: Option<bool>,
 ) -> String {
     if wants_external_punct(
         language,
+        engine,
         punctuate_override,
         models.punct.is_some(),
         models.ru_builtin_punct,
@@ -356,15 +414,17 @@ pub(crate) fn maybe_punctuate(
 }
 
 /// Whether text goes through the external (English CNN-BiLSTM) punctuation
-/// model. Never for RU output that is already punctuated — not even when the
-/// client asked for punctuation, since it would only rewrite it.
+/// model. Never for output that is already punctuated — Parakeet, or a RU
+/// model with built-in punctuation — not even when the client asked for
+/// punctuation, since it would only rewrite it.
 fn wants_external_punct(
     language: &str,
+    engine: Engine,
     punctuate_override: Option<bool>,
     punct_loaded: bool,
     ru_builtin_punct: bool,
 ) -> bool {
-    if language == "ru" && ru_builtin_punct {
+    if engine == Engine::Parakeet || (engine == Engine::Ru && ru_builtin_punct) {
         return false;
     }
     match punctuate_override {
@@ -432,15 +492,33 @@ mod tests {
     }
 
     #[test]
-    fn already_punctuated_ru_output_skips_the_punctuation_model() {
+    fn already_punctuated_output_skips_the_punctuation_model() {
+        use Engine::*;
+        // Parakeet writes case and punctuation: never, even when asked.
+        for lang in ["ru", "en", "uk"] {
+            assert!(!wants_external_punct(lang, Parakeet, None, true, false));
+            assert!(!wants_external_punct(
+                lang,
+                Parakeet,
+                Some(true),
+                true,
+                false
+            ));
+        }
         // RU model with built-in punctuation: never, even when asked.
-        assert!(!wants_external_punct("ru", None, true, true));
-        assert!(!wants_external_punct("ru", Some(true), true, true));
+        assert!(!wants_external_punct("ru", Ru, None, true, true));
+        assert!(!wants_external_punct("ru", Ru, Some(true), true, true));
         // RU model without it: yes when the model is loaded or when asked.
-        assert!(wants_external_punct("ru", None, true, false));
-        assert!(wants_external_punct("ru", Some(true), false, false));
-        // EN is unaffected by the RU flag.
-        assert!(wants_external_punct("en", None, true, true));
-        assert!(!wants_external_punct("en", Some(false), true, true));
+        assert!(wants_external_punct("ru", Ru, None, true, false));
+        assert!(wants_external_punct("ru", Ru, Some(true), false, false));
+        // Moonshine EN is unaffected by the RU flag.
+        assert!(wants_external_punct("en", Moonshine, None, true, true));
+        assert!(!wants_external_punct(
+            "en",
+            Moonshine,
+            Some(false),
+            true,
+            true
+        ));
     }
 }

@@ -70,19 +70,16 @@ pub fn transcribe(
     max_chunk_len: usize,
 ) -> Result<TranscribeResult, TranscribeError> {
     let start = Instant::now();
-    let (wav_path, needs_cleanup) = ensure_wav(audio_path)?;
+    let wav = ensure_wav(audio_path)?;
     let result = do_transcribe(
         models,
         config,
-        &wav_path,
+        wav.path(),
         language,
         vad_override,
         punctuate_override,
         max_chunk_len,
     );
-    if needs_cleanup {
-        let _ = std::fs::remove_file(&wav_path);
-    }
     let elapsed = start.elapsed().as_secs_f64();
     metrics::histogram!(names::TRANSCRIBE_DURATION, "lang" => language.to_string()).record(elapsed);
     let mut res = result?;

@@ -16,7 +16,7 @@ pub async fn transcribe_stream(
     let start = std::time::Instant::now();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
-    let upload = match parse_upload(&mut multipart).await {
+    let upload = match parse_upload(&mut multipart, &state.config.upload_dir).await {
         Ok(u) => u,
         Err(msg) => {
             metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
@@ -30,10 +30,10 @@ pub async fn transcribe_stream(
         }
     };
 
-    let path = upload.file_path;
+    // Owned by the blocking job below: removed when it ends, on any path.
+    let file = upload.file;
     let language = upload.language;
     let vad = upload.vad;
-    let p = path.clone();
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<streaming::StreamEvent>(32);
 
@@ -56,16 +56,14 @@ pub async fn transcribe_stream(
     // Run transcription, then send final event
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
-            let r = streaming::transcribe_streaming(
+            streaming::transcribe_streaming(
                 &state.models,
                 &state.config,
-                &p,
+                file.path(),
                 &language,
                 vad,
                 chunk_tx,
-            );
-            let _ = std::fs::remove_file(&path);
-            r
+            )
         })
         .await;
 

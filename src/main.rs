@@ -26,6 +26,7 @@ mod routing;
 mod smart_format;
 mod spelling;
 mod streaming;
+mod tmpfile;
 mod transcribe;
 mod tts;
 mod upload;

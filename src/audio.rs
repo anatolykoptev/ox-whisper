@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::tmpfile::TempFile;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
     #[error("WAV file too short (need at least 44 bytes, got {0})")]
@@ -65,24 +67,45 @@ pub fn pcm_to_f32(data: &[u8], header: &WavHeader) -> Result<Vec<f32>, AudioErro
     Ok(samples)
 }
 
-pub fn ensure_wav(path: &Path) -> Result<(PathBuf, bool), AudioError> {
+/// A WAV the decoder can read: the input itself when it already is one, or an
+/// ffmpeg conversion that is removed when this value is dropped.
+pub struct WavInput {
+    path: PathBuf,
+    _converted: Option<TempFile>,
+}
+
+impl WavInput {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub fn ensure_wav(path: &Path) -> Result<WavInput, AudioError> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.eq_ignore_ascii_case("wav") {
-        return Ok((path.to_path_buf(), false));
+        return Ok(WavInput {
+            path: path.to_path_buf(),
+            _converted: None,
+        });
     }
-    let out = std::env::temp_dir().join(format!("{}.wav", uuid::Uuid::new_v4()));
+    // Owned before ffmpeg runs: a failed or killed conversion can leave a
+    // partial file behind, and every later exit path removes it too.
+    let out = TempFile::own(std::env::temp_dir().join(format!("{}.wav", uuid::Uuid::new_v4())));
     let result = std::process::Command::new("ffmpeg")
         .args(["-i"])
         .arg(path)
         .args(["-ar", "16000", "-ac", "1", "-f", "wav"])
-        .arg(&out)
+        .arg(out.path())
         .output()?;
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         return Err(AudioError::FfmpegFailed(stderr.into_owned()));
     }
-    Ok((out, true))
+    Ok(WavInput {
+        path: out.path().to_path_buf(),
+        _converted: Some(out),
+    })
 }
 
 pub fn load_wav(path: &Path) -> Result<(Vec<f32>, f64), AudioError> {
@@ -177,8 +200,9 @@ mod tests {
     #[test]
     fn test_ensure_wav_passthrough() {
         let path = Path::new("/tmp/test.wav");
-        let (result, cleanup) = ensure_wav(path).unwrap();
-        assert_eq!(result, path);
-        assert!(!cleanup);
+        let wav = ensure_wav(path).unwrap();
+        assert_eq!(wav.path(), path);
+        // A WAV is used in place and is not ours to delete.
+        drop(wav);
     }
 }

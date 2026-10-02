@@ -23,7 +23,7 @@ pub async fn transcriptions(
     let endpoint = "openai_transcriptions";
     let start = std::time::Instant::now();
 
-    let upload = match upload::parse_openai_upload(&mut multipart).await {
+    let upload = match upload::parse_openai_upload(&mut multipart, &state.config.upload_dir).await {
         Ok(u) => u,
         Err(msg) => {
             metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
@@ -34,9 +34,11 @@ pub async fn transcriptions(
         }
     };
 
-    let file_path = upload.file_path.clone();
+    // Shared with the blocking job: if this handler is dropped (the client
+    // went away) the job keeps running, and the file lives until it is done.
+    let file = upload.file.clone();
     let (language, lang_confidence) = if upload.language.is_empty() {
-        let detection = detect_language_from_file(&state, &file_path);
+        let detection = detect_language_from_file(&state, file.path());
         (detection.language, Some(detection.confidence))
     } else {
         (upload.language.clone(), None)
@@ -44,15 +46,15 @@ pub async fn transcriptions(
 
     let format = upload.response_format;
     let want_words = upload.want_words;
-    let path = file_path.clone();
     let detected_lang = language.clone();
 
     let state_clone = state.clone();
+    let job_file = file.clone();
     let result = tokio::task::spawn_blocking(move || {
         transcribe::transcribe(
             &state_clone.models,
             &state_clone.config,
-            &path,
+            job_file.path(),
             &language,
             None,
             None,
@@ -65,7 +67,7 @@ pub async fn transcriptions(
     let (response, ok) = match result {
         Ok(mut r) => {
             if upload.diarize && state.models.diarize.is_some() {
-                run_diarization(&state, &file_path, &mut r, upload.diarize_speakers).await;
+                run_diarization(&state, file.path(), &mut r, upload.diarize_speakers).await;
             }
             apply_post_processing(&upload, &mut r, &detected_lang);
             let utterances = if upload.diarize {
@@ -98,7 +100,6 @@ pub async fn transcriptions(
     metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
         .record(start.elapsed().as_secs_f64());
 
-    let _ = std::fs::remove_file(&file_path);
     response
 }
 
@@ -108,11 +109,8 @@ async fn run_diarization(
     result: &mut transcribe::TranscribeResult,
     num_speakers: Option<i32>,
 ) {
-    if let Ok((wav_path, tmp)) = audio::ensure_wav(file_path) {
-        if let Ok((samples, _)) = audio::load_wav(&wav_path) {
-            if tmp {
-                let _ = std::fs::remove_file(&wav_path);
-            }
+    if let Ok(wav) = audio::ensure_wav(file_path) {
+        if let Ok((samples, _)) = audio::load_wav(wav.path()) {
             let diarize_state = state.clone();
             let mut words = std::mem::take(&mut result.words);
             let diarized = tokio::task::spawn_blocking(move || {
@@ -192,13 +190,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde
 // --- internals ---
 
 fn detect_language_from_file(state: &Arc<AppState>, path: &Path) -> DetectResult {
-    let wav_result = audio::ensure_wav(path).and_then(|(wav_path, tmp)| {
-        let result = audio::load_wav(&wav_path);
-        if tmp {
-            let _ = std::fs::remove_file(&wav_path);
-        }
-        result
-    });
+    let wav_result = audio::ensure_wav(path).and_then(|wav| audio::load_wav(wav.path()));
     match wav_result {
         Ok((samples, _)) => detect_language(&state.models, &samples),
         Err(e) => {

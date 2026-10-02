@@ -4,9 +4,28 @@ use crate::vad::{apply_vad, lock_vad};
 use crate::words::WordTimestamp;
 use crate::ws_types::{Alternative, Channel, ServerMessage};
 
+/// The session buffer is at its cap.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BufferFull {
+    pub max_samples: usize,
+}
+
+impl std::fmt::Display for BufferFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "audio buffer limit of {} s reached; send Finalize more often or enable vad",
+            self.max_samples / 16000
+        )
+    }
+}
+
 /// Per-connection state for a WebSocket streaming session.
 pub struct WsSession {
     pub sample_rate: u32,
+    /// Most samples the buffer may hold. Enforced in [`Self::push_audio`], the
+    /// only place that grows it.
+    max_samples: usize,
     buffer: Vec<f32>,
     total_samples: usize,
     speech_detected: bool,
@@ -14,9 +33,10 @@ pub struct WsSession {
 }
 
 impl WsSession {
-    pub fn new(sample_rate: u32) -> Self {
+    pub fn new(sample_rate: u32, max_samples: usize) -> Self {
         Self {
             sample_rate,
+            max_samples,
             buffer: Vec::new(),
             total_samples: 0,
             speech_detected: false,
@@ -25,10 +45,21 @@ impl WsSession {
     }
 
     /// Decode and append incoming audio data to the internal buffer.
-    pub fn push_audio(&mut self, data: &[u8], encoding: &str) {
+    ///
+    /// Refuses audio that would take the buffer past its cap (nothing is
+    /// appended): an unbounded buffer is decoded again in full for every
+    /// interim result, which pins the recognizer and grows memory without
+    /// limit.
+    pub fn push_audio(&mut self, data: &[u8], encoding: &str) -> Result<(), BufferFull> {
         let samples = decode_pcm(data, encoding);
+        if self.buffer.len() + samples.len() > self.max_samples {
+            return Err(BufferFull {
+                max_samples: self.max_samples,
+            });
+        }
         self.total_samples += samples.len();
         self.buffer.extend(samples);
+        Ok(())
     }
 
     /// Check if enough audio has accumulated for an interim result.
@@ -83,7 +114,9 @@ impl WsSession {
             self.sample_rate,
             config.vad_speech_pad_s,
             config.vad_max_chunk_s,
-            "ws",
+            // Runs on every frame past 1 s, so silence is the normal outcome
+            // here: a separate label keeps `ws` free of expected silence.
+            "ws_poll",
         );
 
         let has_speech = !result.chunks.is_empty() && result.speech_ms > 0.0;
@@ -182,6 +215,55 @@ pub fn decode_pcm(data: &[u8], encoding: &str) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The per-frame VAD check meets silence all the time; it must not feed the
+    /// `ws` no-speech counter, which alerts treat as a real empty transcript.
+    #[test]
+    fn polling_silence_is_not_counted_as_a_ws_no_speech_result() {
+        let recorder = crate::metrics::test_recorder::CountingRecorder::default();
+        let mut config = Config::from_lookup(&|_| None);
+        config.vad_model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/vad/silero_vad.onnx")
+            .to_string_lossy()
+            .into_owned();
+        // Sample-buffer capacity only; the default allocates an hour of audio.
+        config.max_audio_duration_s = 60.0;
+        let mut models = Models::empty();
+        models.vad = crate::models::load_vad(&config);
+        assert!(models.vad.is_some(), "VAD fixture loads");
+
+        let mut session = WsSession::new(16000, 16000 * 60);
+        session
+            .push_audio(&vec![0u8; 2 * 16000 * 2], "pcm_s16le")
+            .unwrap();
+        let (_, speech_final) =
+            metrics::with_local_recorder(&recorder, || session.run_vad_check(&models, &config));
+
+        assert!(!speech_final);
+        let count = |caller| recorder.count("oxwhisper_vad_no_speech_total", &[("caller", caller)]);
+        assert_eq!(count("ws_poll"), 1, "the check ran and saw silence");
+        assert_eq!(count("ws"), 0);
+    }
+
+    #[test]
+    fn the_buffer_never_grows_past_its_cap() {
+        let mut session = WsSession::new(16000, 8);
+        // 4 samples (8 bytes) at a time.
+        assert_eq!(session.push_audio(&[0u8; 8], "pcm_s16le"), Ok(()));
+        assert_eq!(session.push_audio(&[0u8; 8], "pcm_s16le"), Ok(()));
+        assert_eq!(
+            session.push_audio(&[0u8; 2], "pcm_s16le"),
+            Err(BufferFull { max_samples: 8 })
+        );
+        assert_eq!(
+            session.peek_buffer().len(),
+            8,
+            "a refused push appends nothing"
+        );
+        // Taking the buffer (finalize / speech end) frees the room again.
+        session.take_buffer();
+        assert_eq!(session.push_audio(&[0u8; 8], "pcm_s16le"), Ok(()));
+    }
 
     #[test]
     fn decode_s16le_zeros() {

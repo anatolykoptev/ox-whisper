@@ -6,7 +6,7 @@ use axum::response::Response;
 
 use crate::chunking::sanitize_utf8;
 use crate::handlers::AppState;
-use crate::transcribe::{maybe_punctuate, split_audio_chunks, transcribe_routed};
+use crate::transcribe::{TranscribeError, maybe_punctuate, split_audio_chunks, transcribe_routed};
 use crate::words::{WordTimestamp, compute_chunk_offsets};
 use crate::ws_session::WsSession;
 use crate::ws_types::{ClientMessage, ServerMessage, WsParams};
@@ -56,7 +56,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
         return;
     }
 
-    let mut session = WsSession::new(params.sample_rate);
+    let mut session = WsSession::new(params.sample_rate, state.config.ws_max_buffer_samples());
 
     loop {
         let msg = match socket.recv().await {
@@ -70,7 +70,17 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
 
         match msg {
             Message::Binary(data) => {
-                session.push_audio(&data, &params.encoding);
+                if let Err(full) = session.push_audio(&data, &params.encoding) {
+                    metrics::counter!(crate::metrics::names::WS_BUFFER_LIMIT).increment(1);
+                    let _ = send_msg(
+                        &mut socket,
+                        &ServerMessage::Error {
+                            message: full.to_string(),
+                        },
+                    )
+                    .await;
+                    break;
+                }
 
                 // VAD check if enabled
                 if params.vad {
@@ -139,9 +149,11 @@ async fn do_transcribe(
     if samples.is_empty() {
         return None;
     }
-    let (text, words) =
-        transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
-    Some(session.store_final(text, words, from_finalize))
+    match transcribe_buffer(state, samples, &params.language, params.punctuate).await {
+        Ok(Some((text, words))) => Some(session.store_final(text, words, from_finalize)),
+        Ok(None) => None,
+        Err(e) => Some(buffer_error(&e)),
+    }
 }
 
 /// Transcribe a copy of the buffer for interim results (non-destructive peek).
@@ -154,18 +166,30 @@ async fn do_transcribe_interim(
     if samples.is_empty() {
         return None;
     }
-    let (text, words) =
-        transcribe_buffer(state, samples, &params.language, params.punctuate).await?;
-    Some(session.interim_result(text, words))
+    match transcribe_buffer(state, samples, &params.language, params.punctuate).await {
+        Ok(Some((text, words))) => Some(session.interim_result(text, words)),
+        Ok(None) => None,
+        Err(e) => Some(buffer_error(&e)),
+    }
 }
 
-/// Run transcription on samples via spawn_blocking.
+/// A decode that failed (no free recognizer, a failed reload) is told to the
+/// client: the audio was taken from the buffer, so silence would lose it.
+fn buffer_error(e: &TranscribeError) -> ServerMessage {
+    tracing::warn!("WS transcription failed: {e}");
+    ServerMessage::Error {
+        message: e.to_string(),
+    }
+}
+
+/// Run transcription on samples via spawn_blocking. `Ok(None)` is audio that
+/// decoded to no text; `Err` is a decode that could not run.
 async fn transcribe_buffer(
     state: &Arc<AppState>,
     samples: Vec<f32>,
     language: &str,
     punctuate: bool,
-) -> Option<(String, Vec<WordTimestamp>)> {
+) -> Result<Option<(String, Vec<WordTimestamp>)>, TranscribeError> {
     let models = state.clone();
     let lang = language.to_string();
     let punct = punctuate;
@@ -187,21 +211,20 @@ async fn transcribe_buffer(
             &chunks,
             &offsets,
             config.hallucination_threshold,
-        )
-        .ok()?;
+        )?;
         let text = sanitize_utf8(texts.join(" ").trim());
         if text.is_empty() {
-            return None;
+            return Ok(None);
         }
         let text = if punct {
             maybe_punctuate(&models.models, &text, &lang, engine, Some(true))
         } else {
             text
         };
-        Some((text, words))
+        Ok(Some((text, words)))
     })
     .await
-    .ok()?
+    .unwrap_or(Err(TranscribeError::NoRecognizer))
 }
 
 async fn send_msg(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), ()> {
@@ -211,3 +234,7 @@ async fn send_msg(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), ()>
         .await
         .map_err(|_| ())
 }
+
+#[cfg(test)]
+#[path = "ws_tests.rs"]
+mod tests;

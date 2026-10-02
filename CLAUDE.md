@@ -20,7 +20,6 @@
 | `src/audio.rs` | Audio format conversion (ffmpeg) |
 | `src/punctuate.rs` | Punctuation restoration |
 | `src/smart_format/` · `pii.rs` · `paragraphs.rs` · `spelling.rs` · `diarize.rs` | Post-processing options |
-| `src/tts/` | Optional TTS child process |
 | `vendor/sherpa-rs/` | Vendored sherpa-onnx Rust bindings |
 
 ## API

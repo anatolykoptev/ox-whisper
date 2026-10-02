@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{FromRequest, Multipart, State};
 use axum::http::Request;
-use hyper::body::Bytes;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::*;
@@ -76,7 +76,6 @@ fn state_with_upload_dir(dir: &std::path::Path) -> Arc<AppState> {
     Arc::new(AppState {
         models: Models::empty(),
         config,
-        tts: None,
     })
 }
 

@@ -72,42 +72,6 @@ pub struct Config {
     /// Longest audio a WebSocket session may buffer, seconds (WS_MAX_BUFFER_S,
     /// default: 120). Past it the session gets an error and is closed.
     pub ws_max_buffer_s: usize,
-    /// Text-to-speech child process settings (TTS_* env vars)
-    pub tts: TtsConfig,
-}
-
-/// Text-to-speech child-process configuration.
-///
-/// The TTS engine is an external `tts-server` binary run as a child process on
-/// the loopback interface. When `upstream_url` is set no child is managed and
-/// the supervisor hands out that URL instead.
-// Several fields are read only by tts::supervisor — dead in the bin target
-// until the speech proxy lands (see src/tts/mod.rs).
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Debug)]
-pub struct TtsConfig {
-    /// Enable TTS supervision (TTS_ENABLED, default: false)
-    pub enabled: bool,
-    /// Path to the tts-server binary (TTS_BIN, default: "/opt/qwentts/tts-server")
-    pub bin: String,
-    /// Talker model path, passed as `--model` (TTS_MODEL)
-    pub model: String,
-    /// Codec model path, passed as `--codec` (TTS_CODEC)
-    pub codec: String,
-    /// Loopback port the child binds (TTS_PORT, default: 8093)
-    pub port: u16,
-    /// CPU threads for the child via `QT_N_THREADS` (TTS_THREADS,
-    /// default: max(1, available_parallelism - 1))
-    pub threads: usize,
-    /// `--max-batch` value (TTS_MAX_BATCH, default: 2)
-    pub max_batch: usize,
-    /// Stop the child after this many seconds without in-flight requests
-    /// (TTS_IDLE_STOP_SECS, default: 600, 0 = never stop)
-    pub idle_stop_secs: u64,
-    /// Startup health-check timeout (TTS_STARTUP_TIMEOUT_SECS, default: 60)
-    pub startup_timeout_secs: u64,
-    /// External TTS endpoint; when set no child is spawned (TTS_UPSTREAM_URL)
-    pub upstream_url: Option<String>,
 }
 
 /// Languages Parakeet TDT 0.6B v3 transcribes (its model card's 25 European
@@ -170,42 +134,6 @@ where
             }
         },
         None => default,
-    }
-}
-
-impl TtsConfig {
-    /// Parses TTS configuration from environment variables. `moonshine_port`
-    /// and `prom_port` are the ports already claimed by this process — the
-    /// TTS child must not share them.
-    pub fn from_env(moonshine_port: u16, prom_port: u16) -> Self {
-        const TTS_PORT_DEFAULT: u16 = 8093;
-        let default_threads = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(1).max(1))
-            .unwrap_or(1);
-        let mut port = env_num(&real_env, "TTS_PORT", 1, TTS_PORT_DEFAULT);
-        if port == moonshine_port || port == prom_port {
-            tracing::warn!(
-                "TTS_PORT={port} collides with the STT or metrics port; using {TTS_PORT_DEFAULT}"
-            );
-            port = TTS_PORT_DEFAULT;
-        }
-        if port == moonshine_port || port == prom_port {
-            tracing::warn!("default TTS port {port} also collides — set TTS_PORT to a free port");
-        }
-        Self {
-            enabled: env::var("TTS_ENABLED")
-                .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1"))
-                .unwrap_or(false),
-            bin: env::var("TTS_BIN").unwrap_or_else(|_| "/opt/qwentts/tts-server".to_string()),
-            model: env::var("TTS_MODEL").unwrap_or_default(),
-            codec: env::var("TTS_CODEC").unwrap_or_default(),
-            port,
-            threads: env_num(&real_env, "TTS_THREADS", 1, default_threads),
-            max_batch: env_num(&real_env, "TTS_MAX_BATCH", 1, 2),
-            idle_stop_secs: env_num(&real_env, "TTS_IDLE_STOP_SECS", 0, 600),
-            startup_timeout_secs: env_num(&real_env, "TTS_STARTUP_TIMEOUT_SECS", 1, 60),
-            upstream_url: env::var("TTS_UPSTREAM_URL").ok().filter(|s| !s.is_empty()),
-        }
     }
 }
 
@@ -272,7 +200,6 @@ impl Config {
                 0,
                 PARAKEET_IDLE_EVICT_DEFAULT_SECS,
             ),
-            tts: TtsConfig::from_env(port, prom_port),
         }
     }
 }

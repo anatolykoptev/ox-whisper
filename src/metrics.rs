@@ -33,18 +33,6 @@ pub mod names {
     pub const ROUTE_FALLBACK: &str = "oxwhisper_route_fallback_total";
     /// Acquires that gave up after the bounded wait (→ request error).
     pub const POOL_ACQUIRE_TIMEOUTS: &str = "oxwhisper_pool_acquire_timeouts_total";
-    // Referenced only from tts::supervisor — dead in the bin target until the
-    // speech proxy lands (see src/tts/mod.rs).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub const TTS_CHILD_UP: &str = "oxwhisper_tts_child_up";
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub const TTS_CHILD_STARTS: &str = "oxwhisper_tts_child_starts_total";
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub const TTS_CHILD_RESTARTS: &str = "oxwhisper_tts_child_restarts_total";
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub const TTS_CHILD_STOPS: &str = "oxwhisper_tts_child_stops_total";
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub const TTS_CHILD_START_FAILURES: &str = "oxwhisper_tts_child_start_failures_total";
 }
 
 pub fn install_recorder() -> PrometheusHandle {

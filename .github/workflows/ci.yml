@@ -35,11 +35,9 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build via Docker (aarch64)
-        # Native arm64 runner: QEMU emulation made the C++/ggml qwentts
-        # build prohibitive. The full image (all stages) is built so the
-        # qwentts-build stage and the runtime library check are covered.
-        # A cold native build takes about 3 minutes, so there is no layer
-        # cache (a bare buildx call gets no Actions cache token anyway).
+        # Native arm64 runner (no QEMU). The full image is built, so the
+        # runtime stage is covered too. There is no layer cache (a bare buildx
+        # call gets no Actions cache token anyway).
         run: docker buildx build --platform linux/arm64 .
 
   test:

@@ -253,7 +253,7 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 
 | Model | Languages | Size | Source |
 |-------|-----------|------|--------|
-| Moonshine v2 Base | AR · EN · ES · JA · UK · VI · ZH | 135 MB | [HF](https://huggingface.co/csukuangfj2/sherpa-onnx-moonshine-base-en-quantized-2026-02-27) |
+| Moonshine v2 Base | EN (the stock download; other languages need their own model, [#58](https://github.com/anatolykoptev/ox-whisper/issues/58)) | 135 MB | [HF](https://huggingface.co/csukuangfj2/sherpa-onnx-moonshine-base-en-quantized-2026-02-27) |
 | Zipformer-RU INT8 | RU | 67 MB | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases) |
 | GigaAM v3 RNNT | RU | ~220 MB | [HF](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16) |
 | Parakeet TDT 0.6B v3 (fp32) | 25 European languages | 2.5 GB | [HF](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3) — CC-BY-4.0 (NVIDIA) |

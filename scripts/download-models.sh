@@ -81,10 +81,6 @@ sha256_of() {
     exit 1
   fi
 }
-command -v sha256sum >/dev/null || command -v shasum >/dev/null || {
-  printf 'need sha256sum or shasum to verify the downloads\n' >&2
-  exit 1
-}
 # A file that exists but fails its hash (an older or damaged copy) is fetched
 # again once in the same run; a fresh download that still fails stops the run.
 fetch_sha() {
@@ -112,6 +108,11 @@ case "${OX_WHISPER_PARAKEET:-1}" in
   *) want_parakeet=1 ;;
 esac
 if [[ "$want_parakeet" = 1 ]]; then
+  # only the Parakeet files are hash-checked: fail before fetching them, not after
+  command -v sha256sum >/dev/null || command -v shasum >/dev/null || {
+    printf 'need sha256sum or shasum to verify the Parakeet download\n' >&2
+    exit 1
+  }
   # pinned to the upstream commit, so a re-push upstream cannot change what installs
   PK_BASE="https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/1a468a35cbba69418f126de829e75261dea4a4e4"
   fetch_sha "$PK_BASE/encoder.onnx"    "$MODELS_DIR/parakeet/encoder.onnx"    3eed7ce424bf8339ad09233533c687e2dbd07e74ccf5027b5e7344019ea373b0

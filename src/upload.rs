@@ -4,7 +4,6 @@ use std::path::Path;
 use axum::extract::Multipart;
 use axum::extract::multipart::Field;
 
-use crate::openai::ResponseFormat;
 use crate::tmpfile::TempFile;
 
 pub struct OpenAIUpload {
@@ -14,7 +13,8 @@ pub struct OpenAIUpload {
     pub file: std::sync::Arc<TempFile>,
     /// The language hint as sent; validated with [`crate::language::resolve`].
     pub language: String,
-    pub response_format: ResponseFormat,
+    /// As sent; validated with [`crate::openai::parse_response_format`].
+    pub response_format: String,
     pub want_words: bool,
     pub custom_spelling: Vec<crate::spelling::SpellingRule>,
     pub smart_format: bool,
@@ -80,7 +80,7 @@ pub async fn parse_openai_upload(
 ) -> Result<OpenAIUpload, String> {
     let mut file: Option<TempFile> = None;
     let mut language = String::new();
-    let mut response_format = ResponseFormat::default();
+    let mut response_format = String::new();
     let mut want_words = false;
     let mut custom_spelling = Vec::new();
     let mut smart_format_flag = false;
@@ -96,11 +96,7 @@ pub async fn parse_openai_upload(
         match name.as_str() {
             "file" => store_audio_part(field, dir, &mut file).await?,
             "language" => language = text_part(field).await?,
-            "response_format" => {
-                let val = text_part(field).await?;
-                let quoted = format!("\"{}\"", val);
-                response_format = serde_json::from_str(&quoted).unwrap_or_default();
-            }
+            "response_format" => response_format = text_part(field).await?,
             "timestamp_granularities[]" => {
                 let val = text_part(field).await?;
                 if val == "word" {

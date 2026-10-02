@@ -8,10 +8,10 @@
 |------|------|
 | `src/main.rs` | Axum server, route wiring |
 | `src/config.rs` | Environment config |
-| `src/handlers.rs` · `src/handler_openai.rs` · `src/handler_stream.rs` | HTTP handlers (native, OpenAI-compatible, SSE) |
+| `src/handlers.rs` · `src/handler_openai.rs` | `/health`; the OpenAI-compatible transcription endpoint |
 | `src/ws_handler.rs` · `src/ws_session.rs` | WebSocket streaming |
 | `src/language.rs` | The language hint: validated against Parakeet's 25 languages, else 400 |
-| `src/transcribe.rs` · `src/streaming.rs` | Transcription engine: VAD or chunk split, bounded batch decode |
+| `src/transcribe.rs` | Transcription engine: VAD or chunk split, bounded batch decode |
 | `src/models.rs` | Loads Parakeet + VAD; refuses to start without Parakeet |
 | `src/pool.rs` | Recognizer pool: bounded-wait `acquire`, opt-in idle eviction, `is_healthy` |
 | `src/vad.rs` | Shared Silero VAD (reset per request, poison recovery) |

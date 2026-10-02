@@ -43,7 +43,13 @@ pub async fn transcriptions(
     // Shared with the blocking job: if this handler is dropped (the client
     // went away) the job keeps running, and the file lives until it is done.
     let job_file = upload.file.clone();
-    let format = upload.response_format;
+    let format = match crate::openai::parse_response_format(&upload.response_format) {
+        Ok(f) => f,
+        Err(e) => {
+            observe(endpoint, false, start);
+            return e.into_response();
+        }
+    };
     let want_words = upload.want_words;
 
     let state_clone = state.clone();
@@ -54,7 +60,6 @@ pub async fn transcriptions(
             job_file.path(),
             language.unwrap_or("auto"),
             None,
-            0,
         )
     })
     .await

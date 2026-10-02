@@ -3,8 +3,7 @@ use crate::words::WordTimestamp;
 
 const WORDS_PER_SEGMENT: usize = 8;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum ResponseFormat {
     #[default]
     Json,
@@ -12,6 +11,50 @@ pub enum ResponseFormat {
     Text,
     Srt,
     Vtt,
+}
+
+/// A `response_format` the server does not produce. Falling back to `json`
+/// would hand a client that asked for `srt` a JSON body with a 200.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InvalidResponseFormat(pub String);
+
+impl std::fmt::Display for InvalidResponseFormat {
+    // Wording avoids "unsupported", "corrupted" and "invalid file": OpenAI-SDK
+    // callers retry a 400 containing them as a bad-container error.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "response_format '{}' is not valid; use one of: json, verbose_json, text, srt, vtt",
+            self.0
+        )
+    }
+}
+
+impl axum::response::IntoResponse for InvalidResponseFormat {
+    fn into_response(self) -> axum::response::Response {
+        let body = serde_json::json!({
+            "error": {
+                "message": self.to_string(),
+                "type": "invalid_request_error",
+                "param": "response_format",
+                "code": "invalid_response_format",
+            }
+        });
+        (axum::http::StatusCode::BAD_REQUEST, axum::Json(body)).into_response()
+    }
+}
+
+/// Parses the `response_format` field. Empty means the default, `json`;
+/// anything that is not one of the five formats is an error.
+pub fn parse_response_format(raw: &str) -> Result<ResponseFormat, InvalidResponseFormat> {
+    match raw.trim() {
+        "" | "json" => Ok(ResponseFormat::Json),
+        "verbose_json" => Ok(ResponseFormat::VerboseJson),
+        "text" => Ok(ResponseFormat::Text),
+        "srt" => Ok(ResponseFormat::Srt),
+        "vtt" => Ok(ResponseFormat::Vtt),
+        other => Err(InvalidResponseFormat(other.to_string())),
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -94,9 +137,30 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_verbose_json() {
-        let fmt: ResponseFormat = serde_json::from_str(r#""verbose_json""#).unwrap();
-        assert_eq!(fmt, ResponseFormat::VerboseJson);
+    fn response_formats_parse_and_unknown_ones_are_errors() {
+        for (raw, want) in [
+            ("", ResponseFormat::Json),
+            ("json", ResponseFormat::Json),
+            ("verbose_json", ResponseFormat::VerboseJson),
+            ("text", ResponseFormat::Text),
+            ("srt", ResponseFormat::Srt),
+            ("vtt", ResponseFormat::Vtt),
+        ] {
+            assert_eq!(parse_response_format(raw), Ok(want), "{raw:?}");
+        }
+        for bad in ["verbose-json", "JSON", "xml", "diarized_json"] {
+            assert_eq!(
+                parse_response_format(bad),
+                Err(InvalidResponseFormat(bad.to_string())),
+                "{bad}"
+            );
+        }
+        let msg = InvalidResponseFormat("xml".into())
+            .to_string()
+            .to_lowercase();
+        for word in ["unsupported", "corrupted", "invalid file"] {
+            assert!(!msg.contains(word), "{msg}");
+        }
     }
 
     #[test]

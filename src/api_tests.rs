@@ -11,7 +11,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::config::Config;
-use crate::handlers::{self, AppState, TranscribeRequest};
+use crate::handlers::{self, AppState};
 use crate::models::Models;
 use crate::tmpfile::{listing, scratch_dir};
 
@@ -56,8 +56,8 @@ async fn json_of(res: Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 
-/// Every language-taking entry point, called with `language`. Returns each
-/// one's status, labelled.
+/// The transcription endpoint called with `language`; returns its status,
+/// labelled.
 async fn statuses(language: &str) -> Vec<(&'static str, StatusCode)> {
     let dir = scratch_dir("api-lang");
     let st = state(&dir);
@@ -68,40 +68,14 @@ async fn statuses(language: &str) -> Vec<(&'static str, StatusCode)> {
         crate::handler_openai::transcriptions(State(st.clone()), multipart(&fields).await).await;
     out.push(("openai", res.status()));
 
-    let res = handlers::transcribe_upload(State(st.clone()), multipart(&fields).await).await;
-    out.push(("native upload", res.status()));
-
-    let res =
-        crate::handler_stream::transcribe_stream(State(st.clone()), multipart(&fields).await).await;
-    out.push(("sse", res.status()));
-
-    let res = handlers::transcribe_json(
-        State(st.clone()),
-        axum::Json(TranscribeRequest {
-            audio_path: "/nonexistent/a.wav".into(),
-            language: language.into(),
-            vad: None,
-            max_chunk_len: 0,
-        }),
-    )
-    .await;
-    out.push(("native json", res.status()));
-
-    // The SSE job releases its file when it ends; wait for that, then check
-    // nothing is left.
-    for _ in 0..500 {
-        if listing(&dir).is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    // A refused or failed request leaves nothing behind.
     assert!(listing(&dir).is_empty(), "stranded: {:?}", listing(&dir));
     std::fs::remove_dir(&dir).unwrap();
     out
 }
 
-/// A language Parakeet does not cover is a 400 on every entry point — never a
-/// decode that returns wrong-language text.
+/// A language Parakeet does not cover is a 400 — never a decode that returns
+/// wrong-language text. (The WebSocket's check is in `ws_tests`.)
 #[tokio::test]
 async fn unsupported_languages_are_400_everywhere() {
     for lang in ["zh", "ja", "ar", "vi", "xx"] {
@@ -113,7 +87,7 @@ async fn unsupported_languages_are_400_everywhere() {
 
 /// The positive control: what the API's clients send, and what clients commonly send,
 /// gets past the language check (and then fails on the empty model set, which
-/// is a 500 or the native endpoints' in-body error, but not a 400).
+/// is a 500, but not a 400).
 #[tokio::test]
 async fn supported_or_absent_languages_are_not_refused() {
     for lang in ["ru", "en", "uk", "ru-RU", "EN_us", "", "auto"] {
@@ -169,10 +143,8 @@ async fn diarize_true_is_refused_and_false_is_not() {
 fn result(text: &str) -> crate::transcribe::TranscribeResult {
     crate::transcribe::TranscribeResult {
         text: text.into(),
-        chunks: vec![],
         duration_ms: 10.0,
         audio_duration_ms: 2500.0,
-        speech_ms: 0.0,
         words: vec![],
     }
 }
@@ -253,4 +225,46 @@ async fn health_is_503_without_a_model_and_200_with_a_healthy_pool() {
     let (code, _) = handlers::health(State(st)).await;
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     std::fs::remove_dir(&dir).unwrap();
+}
+
+// --- response_format ---
+
+async fn status_with_format(format: &str) -> (StatusCode, serde_json::Value) {
+    let dir = scratch_dir("api-format");
+    let res = crate::handler_openai::transcriptions(
+        State(state(&dir)),
+        multipart(&[("response_format", format)]).await,
+    )
+    .await;
+    let status = res.status();
+    let body = json_of(res).await;
+    assert!(listing(&dir).is_empty(), "stranded: {:?}", listing(&dir));
+    std::fs::remove_dir(&dir).unwrap();
+    (status, body)
+}
+
+/// An unknown `response_format` used to fall back to `json` with a 200: a
+/// client that asked for `srt` got a JSON body.
+#[tokio::test]
+async fn an_unknown_response_format_is_a_400_not_a_silent_json() {
+    for bad in ["verbose-json", "xml", "JSON"] {
+        let (status, body) = status_with_format(bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        assert_eq!(body["error"]["code"], "invalid_response_format", "{bad}");
+        assert_eq!(body["error"]["param"], "response_format");
+        let text = body.to_string().to_lowercase();
+        for word in ["unsupported", "corrupted", "invalid file"] {
+            assert!(!text.contains(word), "{text}");
+        }
+    }
+}
+
+/// Positive control: the five formats (and none) pass the check, so they fail
+/// later on the empty model set with a 500, not a 400.
+#[tokio::test]
+async fn the_known_response_formats_are_not_refused() {
+    for ok in ["", "json", "verbose_json", "text", "srt", "vtt"] {
+        let (status, _) = status_with_format(ok).await;
+        assert_ne!(status, StatusCode::BAD_REQUEST, "{ok:?}");
+    }
 }

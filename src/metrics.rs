@@ -11,8 +11,8 @@ pub mod names {
     pub const VAD_SPEECH_RATIO: &str = "oxwhisper_vad_speech_ratio";
     pub const CHUNKS_TOTAL: &str = "oxwhisper_chunks_total";
     /// VAD passes that found no speech at all (→ empty transcript), by caller:
-    /// `batch`, `sse`, and `ws_poll` — the WebSocket check that runs on every
-    /// frame, where silence is normal, so alert on `batch`/`sse` only.
+    /// `batch` and `ws_poll` — the WebSocket check that runs on every
+    /// frame, where silence is normal, so alert on `batch` only.
     pub const VAD_NO_SPEECH: &str = "oxwhisper_vad_no_speech_total";
     /// Recoveries from a VAD mutex poisoned by a panic.
     pub const VAD_MUTEX_POISONED: &str = "oxwhisper_vad_mutex_poisoned_total";

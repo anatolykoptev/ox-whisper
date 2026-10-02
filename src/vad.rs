@@ -37,7 +37,7 @@ const WINDOW_SIZE: usize = 512;
 /// speech segments, and groups them into chunks of at most `max_chunk_s` seconds.
 /// Single segments longer than the limit are force-split.
 ///
-/// `caller` labels `oxwhisper_vad_no_speech_total` (`batch`, `sse`, `ws`).
+/// `caller` labels `oxwhisper_vad_no_speech_total` (`batch`, `ws_poll`).
 pub fn apply_vad(
     vad: &mut SileroVad,
     samples: &[f32],

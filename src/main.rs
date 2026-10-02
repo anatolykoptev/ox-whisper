@@ -12,7 +12,6 @@ mod chunking;
 mod config;
 mod formats;
 mod handler_openai;
-mod handler_stream;
 mod handlers;
 mod language;
 mod metrics;
@@ -23,7 +22,6 @@ mod pii;
 mod pool;
 mod smart_format;
 mod spelling;
-mod streaming;
 mod tmpfile;
 mod transcribe;
 mod upload;
@@ -73,12 +71,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route("/transcribe", post(handlers::transcribe_json))
-        .route("/transcribe/upload", post(handlers::transcribe_upload))
-        .route(
-            "/transcribe/stream",
-            post(handler_stream::transcribe_stream),
-        )
         .route(
             "/v1/audio/transcriptions",
             post(handler_openai::transcriptions),

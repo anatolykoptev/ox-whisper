@@ -8,7 +8,7 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
 use crate::audio::{AudioError, ensure_wav, load_wav};
-use crate::chunking::{sanitize_utf8, split_text};
+use crate::chunking::sanitize_utf8;
 use crate::config::Config;
 use crate::models::{Models, PARAKEET_POOL_LABEL};
 use crate::vad::{apply_vad, lock_vad};
@@ -48,10 +48,8 @@ pub enum TranscribeError {
 
 pub struct TranscribeResult {
     pub text: String,
-    pub chunks: Vec<String>,
     pub duration_ms: f64,
     pub audio_duration_ms: f64,
-    pub speech_ms: f64,
     pub words: Vec<WordTimestamp>,
 }
 
@@ -63,18 +61,10 @@ pub fn transcribe(
     audio_path: &Path,
     lang: &str,
     vad_override: Option<bool>,
-    max_chunk_len: usize,
 ) -> Result<TranscribeResult, TranscribeError> {
     let start = Instant::now();
     let wav = ensure_wav(audio_path)?;
-    let result = do_transcribe(
-        models,
-        config,
-        wav.path(),
-        lang,
-        vad_override,
-        max_chunk_len,
-    );
+    let result = do_transcribe(models, config, wav.path(), lang, vad_override);
     let elapsed = start.elapsed().as_secs_f64();
     metrics::histogram!(names::TRANSCRIBE_DURATION, "lang" => lang.to_string()).record(elapsed);
     let mut res = result?;
@@ -88,7 +78,6 @@ fn do_transcribe(
     wav_path: &Path,
     lang: &str,
     vad_override: Option<bool>,
-    max_chunk_len: usize,
 ) -> Result<TranscribeResult, TranscribeError> {
     let (samples, duration) = load_wav(wav_path)?;
     if config.max_audio_duration_s > 0.0 && duration > config.max_audio_duration_s {
@@ -103,7 +92,7 @@ fn do_transcribe(
         vad_override.unwrap_or(duration >= config.vad_min_duration_s && models.vad.is_some());
 
     let max_chunk_samples = config.max_chunk_s * 16000;
-    let (audio_chunks, speech_ms) = if use_vad {
+    let audio_chunks = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
             let mut vad = lock_vad(vad_mutex);
             let vad_result = apply_vad(
@@ -133,12 +122,12 @@ fn do_transcribe(
             metrics::gauge!(names::VAD_SPEECH_RATIO, "lang" => lang.to_string()).set(ratio);
             metrics::counter!(names::CHUNKS_TOTAL, "lang" => lang.to_string())
                 .increment(chunks_count as u64);
-            (vad_result.chunks, vad_result.speech_ms)
+            vad_result.chunks
         } else {
-            (split_audio_chunks(samples, max_chunk_samples), 0.0)
+            split_audio_chunks(samples, max_chunk_samples)
         }
     } else {
-        (split_audio_chunks(samples, max_chunk_samples), 0.0)
+        split_audio_chunks(samples, max_chunk_samples)
     };
 
     let chunk_offsets = compute_chunk_offsets(&audio_chunks, 16000);
@@ -152,18 +141,11 @@ fn do_transcribe(
     // Parakeet writes case and punctuation itself.
     let joined = texts.join(" ");
     let text = sanitize_utf8(joined.trim());
-    let chunks = if max_chunk_len > 0 {
-        split_text(&text, max_chunk_len)
-    } else {
-        Vec::new()
-    };
 
     Ok(TranscribeResult {
         text,
-        chunks,
         duration_ms: 0.0,
         audio_duration_ms: duration * 1000.0,
-        speech_ms,
         words,
     })
 }

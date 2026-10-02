@@ -122,3 +122,27 @@ async fn an_unsupported_language_is_refused_before_the_upgrade() {
         );
     }
 }
+
+/// Decoding assumes 16 kHz and nothing resamples, so any other rate is refused
+/// before the upgrade; 16000, the default, upgrades (the positive control).
+#[tokio::test]
+async fn a_sample_rate_other_than_16k_is_refused_before_the_upgrade() {
+    let addr = serve("1").await;
+    let url = |q: &str| format!("ws://{addr}/v1/listen?{q}");
+
+    for rate in ["8000", "44100", "0"] {
+        let err = tokio_tungstenite::connect_async(url(&format!("sample_rate={rate}")))
+            .await
+            .expect_err("must not upgrade");
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(res) => {
+                assert_eq!(res.status(), 400, "{rate}")
+            }
+            other => panic!("want an HTTP 400, got {other:?}"),
+        }
+    }
+    let (mut ws, _) = tokio_tungstenite::connect_async(url("sample_rate=16000"))
+        .await
+        .unwrap();
+    assert_eq!(next_json(&mut ws).await.unwrap()["type"], "Metadata");
+}

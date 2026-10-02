@@ -38,6 +38,22 @@ pub async fn ws_listen(
     if let Err(e) = language::resolve(&params.language) {
         return e.into_response();
     }
+    // Decoding assumes 16 kHz and nothing resamples: audio sent at another
+    // rate would be transcribed as garbage, so it is refused up front.
+    if params.sample_rate != 16000 {
+        let body = serde_json::json!({
+            "error": {
+                "message": format!(
+                    "sample_rate {} is not supported; send 16000 Hz mono audio",
+                    params.sample_rate
+                ),
+                "type": "invalid_request_error",
+                "param": "sample_rate",
+                "code": "invalid_sample_rate",
+            }
+        });
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+    }
     ws.on_upgrade(move |socket| handle_ws(socket, state, params))
 }
 

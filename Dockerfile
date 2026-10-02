@@ -49,6 +49,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/root/.cache/sccache,sharing=locked \
     cargo chef cook --release --locked --recipe-path recipe.json
 
+# `cargo chef cook` rewrote Cargo.toml with the recipe's skeleton, whose
+# package version is 0.0.1: put the real manifest back, or the binary's
+# CARGO_PKG_VERSION (reported by /health) is 0.0.1. Only ox-whisper itself
+# recompiles; the cooked dependencies keep their cache.
+COPY Cargo.toml Cargo.lock ./
+
 # Build actual binary. Touch src/main.rs to bust cargo's fingerprint
 # (cargo-chef cook left a stub binary at target/release/ox-whisper in the
 # cache mount; without a source-newer-than-binary signal, cargo skips link).

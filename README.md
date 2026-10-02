@@ -109,30 +109,6 @@ async def stream():
 asyncio.run(stream())
 ```
 
-### `POST /transcribe` — JSON, file path
-
-```bash
-curl -X POST http://localhost:8092/transcribe \
-  -H 'Content-Type: application/json' \
-  -d '{"audio_path":"/data/recording.wav","language":"en"}'
-```
-
-Response: `{ "text", "duration_ms", "words":[{"word","start","end","confidence"}], "confidence" }`. Optional fields: `language`, `vad`, `max_chunk_len`.
-
-### `POST /transcribe/upload` — multipart
-
-```bash
-curl -F file=@recording.mp3 -F language=en http://localhost:8092/transcribe/upload
-```
-
-### `POST /transcribe/stream` — SSE chunks
-
-```bash
-curl -N -F file=@long.mp3 -F language=en http://localhost:8092/transcribe/stream
-# data: {"index":0,"text":"...","type":"chunk"}
-# data: {"type":"done"}
-```
-
 ### `GET /health` · `GET /v1/models` · `GET /metrics` (port 9092)
 
 ---
@@ -154,8 +130,8 @@ field does:
 
 A language the model does not cover is refused rather than decoded: the old English-only
 fallback answered `zh`/`ja`/`ar`/`vi` with English-sounding text and HTTP 200
-([#58](https://github.com/anatolykoptev/ox-whisper/issues/58)). The same check runs on the native
-endpoints, SSE and the WebSocket (refused before the upgrade).
+([#58](https://github.com/anatolykoptev/ox-whisper/issues/58)). The same check runs on the WebSocket
+(refused before the upgrade).
 
 **Memory and files.** The fp32 export is an `encoder.onnx` graph plus `encoder.weights`;
 onnxruntime resolves the weights from the process working directory, so run the container with
@@ -267,7 +243,7 @@ scrape_configs:
 | `oxwhisper_audio_duration_seconds` | histogram | — |
 | `oxwhisper_vad_speech_ratio` | gauge | `lang` |
 | `oxwhisper_chunks_total` | counter | `lang` |
-| `oxwhisper_vad_no_speech_total` | counter | `caller` (`batch`, `sse`; `ws_poll` is the per-frame WebSocket check, where silence is normal, so do not alert on it) |
+| `oxwhisper_vad_no_speech_total` | counter | `caller` (`batch`; `ws_poll` is the per-frame WebSocket check, where silence is normal, so do not alert on it) |
 | `oxwhisper_vad_mutex_poisoned_total` | counter | — |
 | `oxwhisper_pool_acquire_wait_seconds` | histogram | — |
 | `oxwhisper_pool_acquire_timeouts_total` | counter | — |
@@ -281,11 +257,11 @@ scrape_configs:
 ## Limitations
 
 - **aarch64 only.** Pre-built `.so` libs are ARM64; x86_64 needs source rebuild of `vendor/sherpa-rs-sys`.
-- **No streaming for `/transcribe`.** Whole-file responses only. Use `/transcribe/stream` (SSE) or `/v1/listen` (WebSocket) for incremental output.
+- **Whole-file responses.** `/v1/audio/transcriptions` answers once the file is decoded. Use `/v1/listen` (WebSocket, 16 kHz mono PCM only) for incremental output.
 - **No auth.** Bind to `0.0.0.0`; put behind nginx / Caddy if exposed to the network.
 - **25 languages** (Parakeet); anything else is a 400. For broader coverage, use `whisper-large-v3` via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) or [speaches](https://github.com/speaches-ai/speaches).
 - **Memory.** Parakeet holds ~3.2 GB and peaks at ~4.3 GB on 5-minute audio; it needs a box with room for that.
-- **Removed in this release.** Moonshine, Zipformer/GigaAM and the English punctuation model (Parakeet replaces all three), language auto-detection (`language_confidence` is gone from `verbose_json`), speaker diarization (`diarize=true` is a 400) and the `punctuate` option (Parakeet always punctuates), and the optional text-to-speech child. `smart_format`, `redact`, `paragraphs`, `custom_spelling` and `keywords` are plain text transforms and stay.
+- **Removed in this release.** Moonshine, Zipformer/GigaAM and the English punctuation model (Parakeet replaces all three), language auto-detection (`language_confidence` is gone from `verbose_json`), speaker diarization (`diarize=true` is a 400) and the `punctuate` option (Parakeet always punctuates), the native endpoints (`/transcribe`, `/transcribe/upload`, `/transcribe/stream`), and the optional text-to-speech child. An unknown `response_format` is now a 400 (it used to fall back to `json`), and `/v1/listen` refuses a `sample_rate` other than 16000 with a 400. `smart_format`, `redact`, `paragraphs`, `custom_spelling` and `keywords` are plain text transforms and stay.
 
 ---
 

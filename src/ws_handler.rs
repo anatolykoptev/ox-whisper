@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::{IntoResponse, Response};
 
@@ -97,6 +97,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
                         },
                     )
                     .await;
+                    close_too_big(&mut socket).await;
                     break;
                 }
 
@@ -155,6 +156,29 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
     }
 }
 
+/// Closes the socket properly after a buffer overrun: a Close frame with 1009
+/// (message too big), then a short bounded wait for the client's reply while
+/// reading and discarding what it still sends. Dropping the socket with
+/// unread inbound frames makes the kernel send a reset, and the client can
+/// lose the Error frame that explains the close.
+async fn close_too_big(socket: &mut WebSocket) {
+    let frame = CloseFrame {
+        code: close_code::SIZE,
+        reason: "audio buffer limit reached".into(),
+    };
+    if socket.send(Message::Close(Some(frame))).await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(Ok(msg)) = socket.recv().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
 /// Transcribe the buffer and return a final Results message.
 async fn do_transcribe(
     state: &Arc<AppState>,
@@ -184,12 +208,20 @@ async fn do_transcribe_interim(
     match transcribe_buffer(state, samples).await {
         Ok(Some((text, words))) => Some(session.interim_result(text, words)),
         Ok(None) => None,
-        Err(e) => Some(buffer_error(&e)),
+        // An interim decode works on a peeked copy, so a failure loses nothing,
+        // and the next interval tries again: with a busy slot an Error every
+        // 2 s would be noise. Count it and skip.
+        Err(e) => {
+            tracing::debug!("WS interim decode skipped: {e}");
+            metrics::counter!(crate::metrics::names::WS_INTERIM_SKIPPED).increment(1);
+            None
+        }
     }
 }
 
-/// A decode that failed (no free recognizer, a failed reload) is told to the
-/// client: the audio was taken from the buffer, so silence would lose it.
+/// A *final* decode that failed (no free recognizer, a failed reload) is told
+/// to the client: its audio was taken out of the buffer, so silence would lose
+/// it. Interim decodes, which work on a copy, skip instead.
 fn buffer_error(e: &TranscribeError) -> ServerMessage {
     tracing::warn!("WS transcription failed: {e}");
     ServerMessage::Error {

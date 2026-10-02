@@ -175,3 +175,71 @@ async fn a_handler_dropped_mid_request_leaves_no_file() {
     );
     std::fs::remove_dir(&dir).unwrap();
 }
+
+/// The handler is dropped while its blocking decode job is running: the job
+/// must still find its input, and the file must be gone once the job ends. A
+/// job holding only a path (the guard staying with the handler) would read a
+/// file that vanished the moment the handler was dropped.
+#[tokio::test]
+async fn a_file_is_not_deleted_under_a_running_job() {
+    let dir = scratch_dir("upload-job");
+    let mut config = Config::from_lookup(&|_| None);
+    config.upload_dir = dir.clone();
+    config.decode_delay = Duration::from_millis(600);
+    let state = Arc::new(AppState {
+        models: Models::empty(),
+        config,
+    });
+
+    let mut body = file_part("file", &[3u8; 2048]);
+    body.extend(closing());
+    let handler = tokio::spawn(crate::handler_openai::transcriptions(
+        State(state),
+        multipart_of(body).await,
+    ));
+
+    let events = |stage: &str| -> Vec<bool> {
+        crate::transcribe::probe::EVENTS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, s, _)| p.starts_with(&dir) && *s == stage)
+            .map(|(_, _, exists)| *exists)
+            .collect()
+    };
+    let wait_for = |stage: &'static str| {
+        let events = &events;
+        async move {
+            for _ in 0..500 {
+                if !events(stage).is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("job never reached {stage}");
+        }
+    };
+
+    wait_for("started").await; // the job is running, stalled
+    handler.abort();
+    assert!(handler.await.unwrap_err().is_cancelled());
+
+    wait_for("after_stall").await;
+    assert_eq!(
+        events("after_stall"),
+        vec![true],
+        "the input vanished under a running job"
+    );
+    for _ in 0..500 {
+        if listing(&dir).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        listing(&dir).is_empty(),
+        "stranded after the job: {:?}",
+        listing(&dir)
+    );
+    std::fs::remove_dir(&dir).unwrap();
+}

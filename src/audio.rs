@@ -80,7 +80,8 @@ impl WavInput {
     }
 }
 
-pub fn ensure_wav(path: &Path) -> Result<WavInput, AudioError> {
+/// `dir` is where a conversion is written (the configured upload directory).
+pub fn ensure_wav(path: &Path, dir: &Path) -> Result<WavInput, AudioError> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.eq_ignore_ascii_case("wav") {
         return Ok(WavInput {
@@ -90,7 +91,7 @@ pub fn ensure_wav(path: &Path) -> Result<WavInput, AudioError> {
     }
     // Owned before ffmpeg runs: a failed or killed conversion can leave a
     // partial file behind, and every later exit path removes it too.
-    let out = TempFile::own(std::env::temp_dir().join(format!("{}.wav", uuid::Uuid::new_v4())));
+    let out = TempFile::own(dir.join(format!("{}.wav", uuid::Uuid::new_v4())));
     let result = std::process::Command::new("ffmpeg")
         .args(["-i"])
         .arg(path)
@@ -197,10 +198,29 @@ mod tests {
         assert!(err.to_string().contains("3-channel"));
     }
 
+    /// `ensure_wav` trusts a `.wav` suffix and skips ffmpeg, so an upload whose
+    /// name was mangled (`voice.og_g`) must not end up with one. With `bin`
+    /// it is sent to ffmpeg, which fails on these bytes (or is absent): an
+    /// error either way, never a pass-through of Ogg bytes as a "WAV".
+    #[test]
+    fn a_mangled_extension_still_gets_the_ffmpeg_probe() {
+        let dir = crate::tmpfile::scratch_dir("ensure-wav");
+        let upload =
+            crate::tmpfile::TempFile::create(&dir, "og_g", b"OggS not really audio").unwrap();
+        assert!(upload.path().to_string_lossy().ends_with(".bin"));
+        assert!(ensure_wav(upload.path(), &dir).is_err());
+        drop(upload);
+        assert!(
+            crate::tmpfile::listing(&dir).is_empty(),
+            "a failed conversion left a file"
+        );
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
     #[test]
     fn test_ensure_wav_passthrough() {
         let path = Path::new("/tmp/test.wav");
-        let wav = ensure_wav(path).unwrap();
+        let wav = ensure_wav(path, Path::new("/tmp")).unwrap();
         assert_eq!(wav.path(), path);
         // A WAV is used in place and is not ours to delete.
         drop(wav);

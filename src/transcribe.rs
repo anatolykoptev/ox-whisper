@@ -53,6 +53,29 @@ pub struct TranscribeResult {
     pub words: Vec<WordTimestamp>,
 }
 
+/// Test instrumentation: records when a decode job starts and whether its input
+/// still exists after a stall, to prove a job keeps its file after the handler
+/// that spawned it was dropped.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    pub static EVENTS: Mutex<Vec<(PathBuf, &'static str, bool)>> = Mutex::new(Vec::new());
+
+    pub fn enter(path: &Path, delay: std::time::Duration) {
+        let push = |stage| {
+            EVENTS
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), stage, path.exists()))
+        };
+        push("started");
+        std::thread::sleep(delay);
+        push("after_stall");
+    }
+}
+
 /// `lang` only labels metrics (the validated request language, or `auto`):
 /// the one model transcribes whatever language it hears.
 pub fn transcribe(
@@ -63,7 +86,9 @@ pub fn transcribe(
     vad_override: Option<bool>,
 ) -> Result<TranscribeResult, TranscribeError> {
     let start = Instant::now();
-    let wav = ensure_wav(audio_path)?;
+    #[cfg(test)]
+    probe::enter(audio_path, config.decode_delay);
+    let wav = ensure_wav(audio_path, &config.upload_dir)?;
     let result = do_transcribe(models, config, wav.path(), lang, vad_override);
     let elapsed = start.elapsed().as_secs_f64();
     metrics::histogram!(names::TRANSCRIBE_DURATION, "lang" => lang.to_string()).record(elapsed);

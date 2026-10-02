@@ -135,7 +135,10 @@ async fn an_upload_owns_its_file_until_dropped() {
 #[tokio::test]
 async fn a_truncated_body_is_an_error_not_a_shorter_request() {
     let dir = scratch_dir("upload-truncated");
+    // The file and one field arrive intact; the next part's header never
+    // finishes.
     let mut body = file_part("file", b"audio");
+    body.extend(text_field("model", "whisper-1"));
     body.extend(b"--oxw-test-boundary\r\nContent-Disposition: form-data; name=\"lang".to_vec());
 
     let res = parse_openai_upload(&mut multipart_of(body).await, &dir).await;

@@ -38,8 +38,8 @@ Models load at startup from mounted volumes. Benchmarks: README and `docs/benchm
 
 ## Deploy
 
-Releases publish `ghcr.io/anatolykoptev/ox-whisper:<version>`; the bundled compose runs that
-image (`OX_WHISPER_VERSION`). To run a local build instead, tag it and point the compose
+Releases publish `ghcr.io/anatolykoptev/ox-whisper:X.Y.Z`, `:X.Y` and `:latest`; the bundled
+compose runs `:latest` unless `OX_WHISPER_VERSION` pins one. To run a local build instead, tag it and point the compose
 `image:` at the tag (or use a compose with a `build:` section), then
 `docker compose up -d --no-deps ox-whisper`.
 

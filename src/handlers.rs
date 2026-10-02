@@ -55,13 +55,9 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             },
         );
     }
-    let ru_model = state
-        .models
-        .ru
-        .as_ref()
-        .and_then(|p| p.acquire().ok())
-        .map(|r| r.model_name())
-        .unwrap_or("none");
+    // Read at load time: taking a pool slot here would make every healthcheck
+    // compete with requests and keep the model from ever being evicted.
+    let ru_model = state.models.ru_model_name;
     languages.insert(
         "ru",
         LanguageInfo {

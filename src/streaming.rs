@@ -10,7 +10,7 @@ use crate::models::Models;
 use crate::transcribe::{
     TranscribeError, TranscribeResult, compression_ratio, maybe_punctuate, split_audio_chunks,
 };
-use crate::vad::apply_vad;
+use crate::vad::{apply_vad, lock_vad};
 
 #[derive(Serialize, Clone)]
 pub struct StreamEvent {
@@ -66,15 +66,14 @@ fn do_transcribe_streaming(
     let max_chunk_samples = config.max_chunk_s * 16000;
     let (audio_chunks, speech_ms) = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
-            let mut vad = vad_mutex
-                .lock()
-                .map_err(|_| TranscribeError::NoRecognizer)?;
+            let mut vad = lock_vad(vad_mutex);
             let vad_result = apply_vad(
                 &mut vad,
                 &samples,
                 16000,
                 config.vad_speech_pad_s,
                 config.vad_max_chunk_s,
+                "sse",
             );
             (vad_result.chunks, vad_result.speech_ms)
         } else {

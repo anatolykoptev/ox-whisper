@@ -1,4 +1,26 @@
+use std::sync::{Mutex, MutexGuard};
+
 use sherpa_rs::silero_vad::SileroVad;
+
+use crate::metrics::names;
+
+/// Locks the shared detector. A panic while it was held (inside
+/// `apply_vad`) poisons the mutex; without recovery every later request on
+/// the VAD path would fail. The detector state is not trusted afterwards —
+/// `apply_vad` resets it before use, and the reset here covers any other user.
+pub fn lock_vad(vad: &Mutex<SileroVad>) -> MutexGuard<'_, SileroVad> {
+    match vad.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("VAD mutex poisoned by an earlier panic — recovering");
+            metrics::counter!(names::VAD_MUTEX_POISONED).increment(1);
+            let mut guard = poisoned.into_inner();
+            guard.reset();
+            vad.clear_poison();
+            guard
+        }
+    }
+}
 
 pub struct VadResult {
     pub chunks: Vec<Vec<f32>>,
@@ -14,12 +36,15 @@ const WINDOW_SIZE: usize = 512;
 /// Feeds samples through Silero VAD in 512-sample windows, collects
 /// speech segments, and groups them into chunks of at most `max_chunk_s` seconds.
 /// Single segments longer than the limit are force-split.
+///
+/// `caller` labels `oxwhisper_vad_no_speech_total` (`batch`, `sse`, `ws`).
 pub fn apply_vad(
     vad: &mut SileroVad,
     samples: &[f32],
     sample_rate: u32,
     pad_s: f32,
     max_chunk_s: usize,
+    caller: &'static str,
 ) -> VadResult {
     let pad_samples = (pad_s * sample_rate as f32) as usize;
     // One detector is shared by every request. Start from a clean state:
@@ -54,6 +79,11 @@ pub fn apply_vad(
     }
 
     let segment_count = segments.len();
+    if segment_count == 0 && !samples.is_empty() {
+        // Nothing is transcribed and the response is an empty text. Count it,
+        // so a regression of the shared-state class is visible.
+        metrics::counter!(names::VAD_NO_SPEECH, "caller" => caller).increment(1);
+    }
     // Calculate total speech duration in ms
     let speech_ms: f64 = segments
         .iter()
@@ -133,25 +163,37 @@ mod tests {
             .0
     }
 
-    /// The production VAD (same loader and settings as `Models::load`) applied
-    /// with the production pad and chunk length.
+    /// Production VAD settings, set explicitly so the developer's environment
+    /// cannot leak into the test (they mirror the `Config` defaults).
+    fn vad_config() -> crate::config::Config {
+        let mut config = crate::config::Config::from_env();
+        config.vad_model = fixture("silero_vad.onnx").to_string_lossy().into_owned();
+        config.vad_threshold = 0.5;
+        config.vad_min_silence_s = 0.5;
+        config.vad_min_speech_s = 0.25;
+        config.vad_speech_pad_s = 0.05;
+        config.vad_max_chunk_s = 20;
+        // Sample-buffer capacity only; the default allocates an hour of audio.
+        config.max_audio_duration_s = 60.0;
+        config
+    }
+
+    /// The production loader and `apply_vad` with the production pad and
+    /// chunk length.
     fn vad_run(vad: &mut SileroVad, samples: &[f32]) -> VadResult {
-        let config = crate::config::Config::from_env();
+        let config = vad_config();
         apply_vad(
             vad,
             samples,
             16000,
             config.vad_speech_pad_s,
             config.vad_max_chunk_s,
+            "test",
         )
     }
 
     fn production_vad() -> SileroVad {
-        let mut config = crate::config::Config::from_env();
-        config.vad_model = fixture("silero_vad.onnx").to_string_lossy().into_owned();
-        // Sample-buffer capacity only; the default allocates an hour of audio.
-        config.max_audio_duration_s = 60.0;
-        crate::models::load_vad(&config)
+        crate::models::load_vad(&vad_config())
             .expect("VAD fixture loads")
             .into_inner()
             .expect("fresh mutex")
@@ -206,5 +248,47 @@ mod tests {
                 r.segments
             );
         }
+    }
+
+    /// A panic while the detector is locked must not turn every later
+    /// VAD-path request into an error.
+    #[test]
+    fn a_poisoned_vad_mutex_recovers() {
+        let vad = std::sync::Arc::new(Mutex::new(production_vad()));
+        let v = vad.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = lock_vad(&v);
+            panic!("simulated panic inside apply_vad");
+        })
+        .join();
+        assert!(vad.is_poisoned());
+
+        let b = samples("fleurs_en_b.wav");
+        let got = vad_run(&mut lock_vad(&vad), &b);
+        assert!(!got.chunks.is_empty());
+        assert!(!vad.is_poisoned(), "poison is cleared after recovery");
+    }
+
+    /// Audio with no speech increments the no-speech counter for its caller.
+    #[test]
+    fn no_speech_is_counted_per_caller() {
+        let recorder = crate::metrics::test_recorder::CountingRecorder::default();
+        let silence = vec![0.0f32; 16000 * 2];
+        let config = vad_config();
+        let r = metrics::with_local_recorder(&recorder, || {
+            apply_vad(
+                &mut production_vad(),
+                &silence,
+                16000,
+                config.vad_speech_pad_s,
+                config.vad_max_chunk_s,
+                "sse",
+            )
+        });
+        assert!(r.chunks.is_empty());
+        assert_eq!(
+            recorder.count("oxwhisper_vad_no_speech_total", &[("caller", "sse")]),
+            1
+        );
     }
 }

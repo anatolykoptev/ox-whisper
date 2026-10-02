@@ -15,6 +15,12 @@ use crate::recognizer::RuRecognizer;
 pub struct Models {
     pub en: Option<std::sync::Arc<EvictablePool<MoonshineRecognizer>>>,
     pub ru: Option<std::sync::Arc<EvictablePool<RuRecognizer>>>,
+    /// Model id of the loaded RU model ("none" when absent), read once at load
+    /// so `/health` and `/v1/models` never take a pool slot.
+    pub ru_model_name: &'static str,
+    /// The RU model punctuates itself (GigaAM v3 transducer): the external
+    /// punctuation model is skipped for `ru` on every path.
+    pub ru_builtin_punct: bool,
     pub vad: Option<Mutex<SileroVad>>,
     pub punct: Option<Mutex<OnlinePunctuation>>,
     pub diarize: Option<crate::diarize::DiarizeEngine>,
@@ -43,6 +49,11 @@ impl Models {
 
         warmup(&en, "EN");
         warmup(&ru, "RU");
+        let (ru_model_name, ru_builtin_punct) = ru
+            .as_ref()
+            .and_then(|p| p.try_acquire().ok())
+            .map(|r| (r.model_name(), r.has_builtin_punct()))
+            .unwrap_or(("none", false));
 
         let mut eviction_handles = Vec::new();
 
@@ -74,6 +85,8 @@ impl Models {
         Self {
             en,
             ru,
+            ru_model_name,
+            ru_builtin_punct,
             vad,
             punct,
             diarize,
@@ -88,6 +101,8 @@ impl Models {
         Self {
             en: None,
             ru: None,
+            ru_model_name: "none",
+            ru_builtin_punct: false,
             vad: None,
             punct: None,
             diarize: None,
@@ -158,7 +173,10 @@ fn load_moonshine(config: &Config) -> Option<std::sync::Arc<EvictablePool<Moonsh
         MoonshineRecognizer::new(cfg_for_factory.clone())
             .map_err(|e| anyhow::anyhow!("MoonshineRecognizer reinit failed: {e}"))
     });
-    let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory);
+    let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory)
+        .with_acquire_timeout(std::time::Duration::from_secs(
+            config.pool_acquire_timeout_s,
+        ));
     metrics::gauge!(metric_names::POOL_SIZE, "lang" => "en").set(size as f64);
     Some(std::sync::Arc::new(pool))
 }
@@ -218,7 +236,10 @@ fn load_nemo_ctc(
                 .map(RuRecognizer::NemoCtc)
                 .map_err(|e| anyhow::anyhow!("NemoCtcRecognizer reinit failed: {e}"))
         });
-    let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory);
+    let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory)
+        .with_acquire_timeout(std::time::Duration::from_secs(
+            config.pool_acquire_timeout_s,
+        ));
     metrics::gauge!(metric_names::POOL_SIZE, "lang" => "ru").set(size as f64);
     Some(std::sync::Arc::new(pool))
 }
@@ -290,7 +311,10 @@ fn load_zipformer(
                 })
                 .map_err(|e| anyhow::anyhow!("TransducerRecognizer reinit failed: {e}"))
         });
-    let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory);
+    let pool = EvictablePool::from_items(recognizers, config.idle_evict_secs, factory)
+        .with_acquire_timeout(std::time::Duration::from_secs(
+            config.pool_acquire_timeout_s,
+        ));
     metrics::gauge!(metric_names::POOL_SIZE, "lang" => "ru").set(size as f64);
     Some(std::sync::Arc::new(pool))
 }
@@ -379,7 +403,7 @@ fn warmup<T: Warmable + Send + 'static>(
     label: &str,
 ) {
     if let Some(p) = pool
-        && let Ok(mut r) = p.acquire()
+        && let Ok(mut r) = p.try_acquire()
     {
         r.warmup();
         tracing::info!("{} warmup complete", label);

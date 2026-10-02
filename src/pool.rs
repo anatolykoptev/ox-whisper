@@ -1,6 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// How long [`EvictablePool::acquire`] waits for a busy slot by default.
+pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ── EvictablePool ─────────────────────────────────────────────────────────────
 
@@ -14,7 +17,7 @@ fn unix_now_secs() -> u64 {
 /// Errors returned by [`EvictablePool::acquire`].
 #[derive(Debug, thiserror::Error)]
 pub enum AcquireError {
-    /// All slots are currently in use.
+    /// All slots stayed in use for the whole acquire timeout.
     #[error("all pool slots are busy")]
     AllBusy,
     /// Factory returned an error when reinitialising an evicted slot.
@@ -43,6 +46,10 @@ pub struct EvictablePool<T> {
     slots: Vec<Arc<EvictableSlot<T>>>,
     factory: Arc<dyn Fn() -> Result<T, anyhow::Error> + Send + Sync>,
     idle_secs: u64,
+    /// Release generation + condvar: a guard drop bumps the counter and wakes
+    /// waiters. The counter closes the race between a failed try and the wait.
+    released: Arc<(Mutex<u64>, Condvar)>,
+    acquire_timeout: Duration,
 }
 
 impl<T: Send + 'static> EvictablePool<T> {
@@ -70,6 +77,8 @@ impl<T: Send + 'static> EvictablePool<T> {
             slots,
             factory,
             idle_secs,
+            released: Arc::new((Mutex::new(0), Condvar::new())),
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         }
     }
 
@@ -97,15 +106,61 @@ impl<T: Send + 'static> EvictablePool<T> {
             slots,
             factory,
             idle_secs,
+            released: Arc::new((Mutex::new(0), Condvar::new())),
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         }
     }
 
-    /// Acquire an idle slot. Re-initializes evicted slots via factory (cold start).
+    /// Sets how long [`Self::acquire`] waits for a busy slot.
+    pub fn with_acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.acquire_timeout = timeout;
+        self
+    }
+
+    /// Acquire a slot, waiting up to the acquire timeout while all are busy.
+    /// Blocks the calling thread: call it from blocking code, not an async task.
+    ///
+    /// Returns `Err(AcquireError::AllBusy)` if no slot freed up in time.
+    /// Returns `Err(AcquireError::ReinitFailed)` as [`Self::try_acquire`] does.
+    pub fn acquire(&self) -> Result<EvictableGuard<T>, AcquireError> {
+        let start = Instant::now();
+        let deadline = start + self.acquire_timeout;
+        let (lock, cvar) = &*self.released;
+        loop {
+            let seen = *lock.lock().unwrap_or_else(|p| p.into_inner());
+            match self.try_acquire() {
+                Err(AcquireError::AllBusy) => {}
+                other => {
+                    if other.is_ok() && start.elapsed() > Duration::from_millis(1) {
+                        metrics::histogram!(crate::metrics::names::POOL_ACQUIRE_WAIT)
+                            .record(start.elapsed().as_secs_f64());
+                    }
+                    return other;
+                }
+            }
+            let mut generation = lock.lock().unwrap_or_else(|p| p.into_inner());
+            while *generation == seen {
+                let now = Instant::now();
+                if now >= deadline {
+                    metrics::counter!(crate::metrics::names::POOL_ACQUIRE_TIMEOUTS).increment(1);
+                    tracing::warn!("pool acquire timed out after {:?}", self.acquire_timeout);
+                    return Err(AcquireError::AllBusy);
+                }
+                generation = cvar
+                    .wait_timeout(generation, deadline - now)
+                    .unwrap_or_else(|p| p.into_inner())
+                    .0;
+            }
+        }
+    }
+
+    /// Acquire an idle slot without waiting. Re-initializes evicted slots via
+    /// factory (cold start).
     ///
     /// Returns `Err(AcquireError::AllBusy)` if all slots are in use.
     /// Returns `Err(AcquireError::ReinitFailed)` if an evicted slot's factory call fails;
     /// in this case the slot is left as `None` (not permanently dead — next acquire retries).
-    pub fn acquire(&self) -> Result<EvictableGuard<T>, AcquireError> {
+    pub fn try_acquire(&self) -> Result<EvictableGuard<T>, AcquireError> {
         let now = unix_now_secs();
         for slot in &self.slots {
             // Skip slots that are already in use.
@@ -145,6 +200,7 @@ impl<T: Send + 'static> EvictablePool<T> {
                         metrics::counter!(crate::metrics::names::POOL_REINIT_FAILURES).increment(1);
                         // Leave slot as None; clear busy so next acquire can retry.
                         slot.busy.store(false, Ordering::Release);
+                        notify_released(&self.released);
                         return Err(AcquireError::ReinitFailed(e));
                     }
                 };
@@ -166,6 +222,7 @@ impl<T: Send + 'static> EvictablePool<T> {
                 return Ok(EvictableGuard {
                     slot: Arc::clone(slot),
                     item: Some(item),
+                    released: Arc::clone(&self.released),
                 });
             }
 
@@ -181,6 +238,7 @@ impl<T: Send + 'static> EvictablePool<T> {
             return Ok(EvictableGuard {
                 slot: Arc::clone(slot),
                 item: Some(item),
+                released: Arc::clone(&self.released),
             });
         }
         Err(AcquireError::AllBusy)
@@ -258,10 +316,19 @@ impl<T: Send + 'static> EvictablePool<T> {
     }
 }
 
+/// Wakes acquirers waiting for a slot.
+fn notify_released(released: &(Mutex<u64>, Condvar)) {
+    let (lock, cvar) = released;
+    let mut generation = lock.lock().unwrap_or_else(|p| p.into_inner());
+    *generation = generation.wrapping_add(1);
+    cvar.notify_all();
+}
+
 /// RAII guard that returns the item to its slot on drop and refreshes `last_used`.
 pub struct EvictableGuard<T> {
     slot: Arc<EvictableSlot<T>>,
     item: Option<T>,
+    released: Arc<(Mutex<u64>, Condvar)>,
 }
 
 impl<T> std::ops::Deref for EvictableGuard<T> {
@@ -294,6 +361,7 @@ impl<T> Drop for EvictableGuard<T> {
                 self.slot.busy.store(false, Ordering::Release);
                 tracing::error!("pool mutex poisoned on guard drop — item lost");
             }
+            notify_released(&self.released);
         }
     }
 }
@@ -623,5 +691,30 @@ mod tests {
             Duration::from_secs(5),
             "aggressive threshold: 1s → 5s minimum"
         );
+    }
+
+    // ── bounded wait ────────────────────────────────────────────────────────
+    /// With every slot busy, acquire waits for a release instead of failing.
+    #[test]
+    fn acquire_waits_for_a_released_slot() {
+        let pool = Arc::new(make_pool(1, 0).with_acquire_timeout(Duration::from_secs(5)));
+        let held = pool.acquire().expect("first acquire");
+        let p = pool.clone();
+        let waiter = std::thread::spawn(move || p.acquire().map(|g| *g));
+        std::thread::sleep(Duration::from_millis(200));
+        drop(held);
+        assert_eq!(waiter.join().unwrap().expect("second acquire waits"), 42);
+    }
+
+    /// The wait is bounded: a slot that never frees up gives AllBusy.
+    #[test]
+    fn acquire_gives_up_after_the_timeout() {
+        let pool = make_pool(1, 0).with_acquire_timeout(Duration::from_millis(150));
+        let _held = pool.acquire().expect("first acquire");
+        let t = Instant::now();
+        assert!(matches!(pool.acquire(), Err(AcquireError::AllBusy)));
+        assert!(t.elapsed() >= Duration::from_millis(150));
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        assert!(matches!(pool.try_acquire(), Err(AcquireError::AllBusy)));
     }
 }

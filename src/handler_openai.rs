@@ -172,14 +172,9 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde
             "owned_by": "ox-whisper",
         }));
     }
-    if let Some(pool) = state.models.ru.as_ref() {
-        let name = pool
-            .acquire()
-            .ok()
-            .map(|r| r.model_name())
-            .unwrap_or("ru-model");
+    if state.models.ru.is_some() {
         data.push(serde_json::json!({
-            "id": name,
+            "id": state.models.ru_model_name,
             "object": "model",
             "owned_by": "ox-whisper",
         }));

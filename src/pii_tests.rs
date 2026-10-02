@@ -7,7 +7,6 @@ fn word(w: &str) -> WordTimestamp {
         start: 0.0,
         end: 0.0,
         confidence: None,
-        speaker: None,
     }
 }
 

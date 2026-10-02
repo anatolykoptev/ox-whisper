@@ -95,23 +95,6 @@ async fn a_second_audio_part_is_refused_and_the_first_is_not_stranded() {
     std::fs::remove_dir(&dir).unwrap();
 }
 
-#[tokio::test]
-async fn the_native_endpoint_counts_file_and_audio_as_the_same_slot() {
-    let dir = scratch_dir("upload-native-two");
-    let mut body = file_part("file", b"first");
-    body.extend(file_part("audio", b"second"));
-    body.extend(closing());
-
-    let res = crate::handlers::parse_upload(&mut multipart_of(body).await, &dir).await;
-    let err = match res {
-        Err(e) => e,
-        Ok(_) => panic!("two audio parts must be refused"),
-    };
-    assert!(err.contains("only one audio file"), "{err}");
-    assert!(listing(&dir).is_empty(), "stranded: {:?}", listing(&dir));
-    std::fs::remove_dir(&dir).unwrap();
-}
-
 /// Positive control for the tests around it: the happy path does write the
 /// file, owns it while the upload lives, and removes it when the upload goes.
 #[tokio::test]
@@ -124,7 +107,7 @@ async fn an_upload_owns_its_file_until_dropped() {
     let upload = parse_openai_upload(&mut multipart_of(body).await, &dir)
         .await
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(upload.language, "ru");
+    assert_eq!(crate::language::resolve(&upload.language), Ok(Some("ru")));
     assert_eq!(listing(&dir).len(), 1);
     assert_eq!(std::fs::read(upload.file.path()).unwrap(), b"audio-bytes");
     drop(upload);

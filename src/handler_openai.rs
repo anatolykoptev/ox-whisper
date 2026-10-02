@@ -1,15 +1,14 @@
 /// OpenAI-compatible /v1/audio/transcriptions endpoint.
-use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-use crate::audio;
-use crate::detect::{DetectResult, detect_language};
 use crate::formats;
-use crate::handlers::AppState;
+use crate::handlers::{AppState, observe};
+use crate::language;
+use crate::models::PARAKEET_MODEL_NAME;
 use crate::openai::{
     JsonResponse, ResponseFormat, VerboseJsonResponse, words_to_openai, words_to_segments,
 };
@@ -26,39 +25,41 @@ pub async fn transcriptions(
     let upload = match upload::parse_openai_upload(&mut multipart, &state.config.upload_dir).await {
         Ok(u) => u,
         Err(msg) => {
-            metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => "err")
-                .increment(1);
-            metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
-                .record(start.elapsed().as_secs_f64());
+            observe(endpoint, false, start);
             return error_response(StatusCode::BAD_REQUEST, &msg);
+        }
+    };
+
+    // Before any decode: a language the model does not cover must not come
+    // back as plausible text with a 200.
+    let language = match language::resolve(&upload.language) {
+        Ok(l) => l,
+        Err(e) => {
+            observe(endpoint, false, start);
+            return e.into_response();
         }
     };
 
     // Shared with the blocking job: if this handler is dropped (the client
     // went away) the job keeps running, and the file lives until it is done.
-    let file = upload.file.clone();
-    let (language, lang_confidence) = if upload.language.is_empty() {
-        let detection = detect_language_from_file(&state, file.path());
-        (detection.language, Some(detection.confidence))
-    } else {
-        (upload.language.clone(), None)
+    let job_file = upload.file.clone();
+    let format = match crate::openai::parse_response_format(&upload.response_format) {
+        Ok(f) => f,
+        Err(e) => {
+            observe(endpoint, false, start);
+            return e.into_response();
+        }
     };
-
-    let format = upload.response_format;
     let want_words = upload.want_words;
-    let detected_lang = language.clone();
 
     let state_clone = state.clone();
-    let job_file = file.clone();
     let result = tokio::task::spawn_blocking(move || {
         transcribe::transcribe(
             &state_clone.models,
             &state_clone.config,
             job_file.path(),
-            &language,
+            language.unwrap_or("auto"),
             None,
-            None,
-            0,
         )
     })
     .await
@@ -66,25 +67,9 @@ pub async fn transcriptions(
 
     let (response, ok) = match result {
         Ok(mut r) => {
-            if upload.diarize && state.models.diarize.is_some() {
-                run_diarization(&state, file.path(), &mut r, upload.diarize_speakers).await;
-            }
-            apply_post_processing(&upload, &mut r, &detected_lang);
-            let utterances = if upload.diarize {
-                crate::diarize::words_to_utterances(&r.words)
-            } else {
-                vec![]
-            };
+            apply_post_processing(&upload, &mut r, language);
             (
-                format_response(
-                    format,
-                    &r,
-                    &detected_lang,
-                    want_words,
-                    lang_confidence,
-                    upload.extra,
-                    utterances,
-                ),
+                format_response(format, &r, language, want_words, upload.extra),
                 true,
             )
         }
@@ -94,49 +79,25 @@ pub async fn transcriptions(
         ),
     };
 
-    let status = if ok { "ok" } else { "err" };
-    metrics::counter!(crate::metrics::names::REQUESTS_TOTAL, "endpoint" => endpoint, "status" => status)
-        .increment(1);
-    metrics::histogram!(crate::metrics::names::REQUEST_DURATION, "endpoint" => endpoint)
-        .record(start.elapsed().as_secs_f64());
-
+    observe(endpoint, ok, start);
     response
 }
 
-async fn run_diarization(
-    state: &Arc<AppState>,
-    file_path: &Path,
-    result: &mut transcribe::TranscribeResult,
-    num_speakers: Option<i32>,
-) {
-    if let Ok(wav) = audio::ensure_wav(file_path, &state.config.upload_dir) {
-        if let Ok((samples, _)) = audio::load_wav(wav.path()) {
-            let diarize_state = state.clone();
-            let mut words = std::mem::take(&mut result.words);
-            let diarized = tokio::task::spawn_blocking(move || {
-                if let Some(ref engine) = diarize_state.models.diarize {
-                    engine.assign_speakers(&samples, &mut words, num_speakers);
-                }
-                words
-            })
-            .await
-            .unwrap_or_default();
-            result.words = diarized;
-        }
-    }
-}
-
-fn apply_post_processing(
+pub(crate) fn apply_post_processing(
     upload: &upload::OpenAIUpload,
     r: &mut transcribe::TranscribeResult,
-    detected_lang: &str,
+    language: Option<&str>,
 ) {
     if !upload.custom_spelling.is_empty() {
         r.text = crate::spelling::apply_spelling(&r.text, &upload.custom_spelling);
         crate::spelling::apply_spelling_to_words(&mut r.words, &upload.custom_spelling);
     }
-    if upload.smart_format {
-        r.text = crate::smart_format::smart_format(&r.text, detected_lang);
+    // The rules are per language. With no hint there is no language to apply
+    // them for, and guessing "en" would run English rules over Russian audio.
+    if upload.smart_format
+        && let Some(lang) = language
+    {
+        r.text = crate::smart_format::smart_format(&r.text, lang);
     }
     if upload.paragraphs {
         r.text = crate::paragraphs::split_paragraphs(
@@ -163,23 +124,9 @@ fn apply_post_processing(
 
 pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde_json::Value> {
     let mut data = Vec::new();
-    if state.models.en.is_some() {
-        data.push(serde_json::json!({
-            "id": "moonshine-v2-base",
-            "object": "model",
-            "owned_by": "ox-whisper",
-        }));
-    }
     if state.models.parakeet.is_some() {
         data.push(serde_json::json!({
-            "id": crate::recognizer::PARAKEET_MODEL_NAME,
-            "object": "model",
-            "owned_by": "ox-whisper",
-        }));
-    }
-    if state.models.ru.is_some() {
-        data.push(serde_json::json!({
-            "id": state.models.ru_model_name,
+            "id": PARAKEET_MODEL_NAME,
             "object": "model",
             "owned_by": "ox-whisper",
         }));
@@ -187,31 +134,12 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde
     axum::Json(serde_json::json!({ "object": "list", "data": data }))
 }
 
-// --- internals ---
-
-fn detect_language_from_file(state: &Arc<AppState>, path: &Path) -> DetectResult {
-    let wav_result = audio::ensure_wav(path, &state.config.upload_dir)
-        .and_then(|wav| audio::load_wav(wav.path()));
-    match wav_result {
-        Ok((samples, _)) => detect_language(&state.models, &samples),
-        Err(e) => {
-            tracing::warn!("language detection failed, defaulting to en: {e}");
-            DetectResult {
-                language: "en".to_string(),
-                confidence: 0.0,
-            }
-        }
-    }
-}
-
-fn format_response(
+pub(crate) fn format_response(
     format: ResponseFormat,
     result: &transcribe::TranscribeResult,
-    language: &str,
+    language: Option<&str>,
     want_words: bool,
-    language_confidence: Option<f64>,
     extra: Option<serde_json::Value>,
-    utterances: Vec<crate::diarize::Utterance>,
 ) -> Response {
     match format {
         ResponseFormat::Json => {
@@ -228,15 +156,12 @@ fn format_response(
             } else {
                 vec![]
             };
-            let lang = if language.is_empty() { "en" } else { language };
             let body = VerboseJsonResponse {
                 text: result.text.clone(),
-                language: lang.to_string(),
+                language: language.map(str::to_string),
                 duration: result.audio_duration_ms / 1000.0,
                 segments,
                 words,
-                language_confidence,
-                utterances,
                 extra,
             };
             axum::Json(body).into_response()

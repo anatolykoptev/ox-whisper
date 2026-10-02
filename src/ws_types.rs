@@ -5,25 +5,20 @@ use crate::words::WordTimestamp;
 /// Query parameters for the WebSocket `/v1/listen` endpoint.
 #[derive(Debug, Deserialize)]
 pub struct WsParams {
-    #[serde(default = "default_lang")]
+    /// Language hint; empty or `auto` means none. Validated before the
+    /// upgrade (see `language::resolve`).
+    #[serde(default)]
     pub language: String,
     #[serde(default = "default_true")]
     pub vad: bool,
     #[serde(default)]
     pub interim_results: bool,
-    #[serde(default)]
-    pub smart_format: bool,
-    #[serde(default = "default_true")]
-    pub punctuate: bool,
     #[serde(default = "default_encoding")]
     pub encoding: String,
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
 }
 
-fn default_lang() -> String {
-    "en".to_string()
-}
 fn default_true() -> bool {
     true
 }

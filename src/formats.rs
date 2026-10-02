@@ -99,7 +99,6 @@ mod tests {
             start,
             end,
             confidence: None,
-            speaker: None,
         }
     }
 

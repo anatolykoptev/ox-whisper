@@ -42,12 +42,17 @@ COPY vendor/ vendor/
 
 # Cook deps (cached layer)
 COPY --from=planner /app/recipe.json recipe.json
-COPY Cargo.toml Cargo.lock ./
 ENV SHERPA_LIB_PATH=/app/vendor/sherpa-onnx
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     --mount=type=cache,target=/root/.cache/sccache,sharing=locked \
     cargo chef cook --release --locked --recipe-path recipe.json
+
+# `cargo chef cook` rewrote Cargo.toml with the recipe's skeleton, whose
+# package version is 0.0.1: put the real manifest back, or the binary's
+# CARGO_PKG_VERSION (reported by /health) is 0.0.1. Only ox-whisper itself
+# recompiles; the cooked dependencies keep their cache.
+COPY Cargo.toml Cargo.lock ./
 
 # Build actual binary. Touch src/main.rs to bust cargo's fingerprint
 # (cargo-chef cook left a stub binary at target/release/ox-whisper in the
@@ -78,14 +83,8 @@ RUN ldconfig
 COPY --from=builder /binary /usr/local/bin/ox-whisper
 
 ENV MOONSHINE_PORT=8092
-ENV MOONSHINE_MODELS_DIR=/models
-ENV ZIPFORMER_RU_DIR=/ru-models
 ENV PARAKEET_DIR=/parakeet-models
 ENV SILERO_VAD_MODEL=/vad/silero_vad.onnx
-ENV PUNCT_MODEL=/punct/model.int8.onnx
-ENV PUNCT_VOCAB=/punct/bpe.vocab
-ENV DIARIZE_SEGMENTATION_MODEL=/diarize/segmentation.onnx
-ENV DIARIZE_EMBEDDING_MODEL=/diarize/embedding.onnx
 
 EXPOSE 8092
 EXPOSE 9092

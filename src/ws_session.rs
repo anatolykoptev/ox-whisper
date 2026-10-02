@@ -83,11 +83,6 @@ impl WsSession {
         self.buffer.clone()
     }
 
-    /// Current timestamp in seconds based on total samples received.
-    pub fn timestamp_s(&self) -> f64 {
-        self.total_samples as f64 / self.sample_rate as f64
-    }
-
     /// Run VAD on the current buffer. Returns server messages and whether speech ended.
     /// Only triggers speech_final when we have >= 1s of audio and VAD found segments.
     pub fn run_vad_check(

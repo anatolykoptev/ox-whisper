@@ -11,8 +11,8 @@ pub mod names {
     pub const VAD_SPEECH_RATIO: &str = "oxwhisper_vad_speech_ratio";
     pub const CHUNKS_TOTAL: &str = "oxwhisper_chunks_total";
     /// VAD passes that found no speech at all (→ empty transcript), by caller:
-    /// `batch`, `sse`, and `ws_poll` — the WebSocket check that runs on every
-    /// frame, where silence is normal, so alert on `batch`/`sse` only.
+    /// `batch` and `ws_poll` — the WebSocket check that runs on every
+    /// frame, where silence is normal, so alert on `batch` only.
     pub const VAD_NO_SPEECH: &str = "oxwhisper_vad_no_speech_total";
     /// Recoveries from a VAD mutex poisoned by a panic.
     pub const VAD_MUTEX_POISONED: &str = "oxwhisper_vad_mutex_poisoned_total";
@@ -31,8 +31,6 @@ pub mod names {
     pub const POOL_MUTEX_POISONED: &str = "oxwhisper_pool_mutex_poisoned_total";
     /// Time an acquire waited for a busy pool slot (only waits are recorded).
     pub const POOL_ACQUIRE_WAIT: &str = "oxwhisper_pool_acquire_wait_seconds";
-    /// Requests served by a fallback model because Parakeet failed to reload.
-    pub const ROUTE_FALLBACK: &str = "oxwhisper_route_fallback_total";
     /// Acquires that gave up after the bounded wait (→ request error).
     pub const POOL_ACQUIRE_TIMEOUTS: &str = "oxwhisper_pool_acquire_timeouts_total";
 }

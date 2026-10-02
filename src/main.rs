@@ -5,27 +5,23 @@ use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 
+#[cfg(test)]
+mod api_tests;
 mod audio;
 mod chunking;
 mod config;
-mod detect;
-mod diarize;
 mod formats;
 mod handler_openai;
-mod handler_stream;
 mod handlers;
+mod language;
 mod metrics;
 mod models;
 mod openai;
 mod paragraphs;
 mod pii;
 mod pool;
-mod punctuate;
-mod recognizer;
-mod routing;
 mod smart_format;
 mod spelling;
-mod streaming;
 mod tmpfile;
 mod transcribe;
 mod upload;
@@ -58,26 +54,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("invalid prom_port");
     tokio::spawn(metrics::serve(prom_handle, prom_addr));
 
-    if config.idle_evict_secs > 0 {
-        tracing::info!(
-            "Idle eviction enabled: recognizers will be evicted after {}s of inactivity",
-            config.idle_evict_secs
-        );
+    for var in config::removed_settings_present(&|k| std::env::var(k).ok()) {
+        tracing::warn!("{var} is set but no longer used; it is ignored");
     }
 
     tracing::info!("Loading models...");
-    let models = Models::load(&config);
+    let models = match Models::load(&config) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!("{e}");
+            std::process::exit(1);
+        }
+    };
 
     let state = Arc::new(AppState { models, config });
 
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route("/transcribe", post(handlers::transcribe_json))
-        .route("/transcribe/upload", post(handlers::transcribe_upload))
-        .route(
-            "/transcribe/stream",
-            post(handler_stream::transcribe_stream),
-        )
         .route(
             "/v1/audio/transcriptions",
             post(handler_openai::transcriptions),

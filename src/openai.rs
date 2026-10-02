@@ -3,8 +3,7 @@ use crate::words::WordTimestamp;
 
 const WORDS_PER_SEGMENT: usize = 8;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum ResponseFormat {
     #[default]
     Json,
@@ -12,6 +11,50 @@ pub enum ResponseFormat {
     Text,
     Srt,
     Vtt,
+}
+
+/// A `response_format` the server does not produce. Falling back to `json`
+/// would hand a client that asked for `srt` a JSON body with a 200.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InvalidResponseFormat(pub String);
+
+impl std::fmt::Display for InvalidResponseFormat {
+    // Wording avoids "unsupported", "corrupted" and "invalid file": OpenAI-SDK
+    // callers retry a 400 containing them as a bad-container error.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "response_format '{}' is not valid; use one of: json, verbose_json, text, srt, vtt",
+            self.0
+        )
+    }
+}
+
+impl axum::response::IntoResponse for InvalidResponseFormat {
+    fn into_response(self) -> axum::response::Response {
+        let body = serde_json::json!({
+            "error": {
+                "message": self.to_string(),
+                "type": "invalid_request_error",
+                "param": "response_format",
+                "code": "invalid_response_format",
+            }
+        });
+        (axum::http::StatusCode::BAD_REQUEST, axum::Json(body)).into_response()
+    }
+}
+
+/// Parses the `response_format` field. Empty means the default, `json`;
+/// anything that is not one of the five formats is an error.
+pub fn parse_response_format(raw: &str) -> Result<ResponseFormat, InvalidResponseFormat> {
+    match raw.trim() {
+        "" | "json" => Ok(ResponseFormat::Json),
+        "verbose_json" => Ok(ResponseFormat::VerboseJson),
+        "text" => Ok(ResponseFormat::Text),
+        "srt" => Ok(ResponseFormat::Srt),
+        "vtt" => Ok(ResponseFormat::Vtt),
+        other => Err(InvalidResponseFormat(other.to_string())),
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -39,15 +82,14 @@ pub struct Word {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VerboseJsonResponse {
     pub text: String,
-    pub language: String,
+    /// The language hint the request carried; absent when it carried none —
+    /// the model does not report what it heard, and none is guessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     pub duration: f64,
     pub segments: Vec<Segment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Word>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub language_confidence: Option<f64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub utterances: Vec<crate::diarize::Utterance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
 }
@@ -95,9 +137,30 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_verbose_json() {
-        let fmt: ResponseFormat = serde_json::from_str(r#""verbose_json""#).unwrap();
-        assert_eq!(fmt, ResponseFormat::VerboseJson);
+    fn response_formats_parse_and_unknown_ones_are_errors() {
+        for (raw, want) in [
+            ("", ResponseFormat::Json),
+            ("json", ResponseFormat::Json),
+            ("verbose_json", ResponseFormat::VerboseJson),
+            ("text", ResponseFormat::Text),
+            ("srt", ResponseFormat::Srt),
+            ("vtt", ResponseFormat::Vtt),
+        ] {
+            assert_eq!(parse_response_format(raw), Ok(want), "{raw:?}");
+        }
+        for bad in ["verbose-json", "JSON", "xml", "diarized_json"] {
+            assert_eq!(
+                parse_response_format(bad),
+                Err(InvalidResponseFormat(bad.to_string())),
+                "{bad}"
+            );
+        }
+        let msg = InvalidResponseFormat("xml".into())
+            .to_string()
+            .to_lowercase();
+        for word in ["unsupported", "corrupted", "invalid file"] {
+            assert!(!msg.contains(word), "{msg}");
+        }
     }
 
     #[test]
@@ -108,7 +171,6 @@ mod tests {
                 start: i as f32,
                 end: i as f32 + 0.5,
                 confidence: None,
-                speaker: None,
             })
             .collect();
 
@@ -132,37 +194,39 @@ mod tests {
         assert_eq!(json["text"], "hello world");
     }
 
-    #[test]
-    fn verbose_response_omits_empty_words() {
-        let resp = VerboseJsonResponse {
+    fn verbose(language: Option<&str>) -> VerboseJsonResponse {
+        VerboseJsonResponse {
             text: "hi".to_string(),
-            language: "en".to_string(),
-            duration: 1.0,
+            language: language.map(str::to_string),
+            duration: 1.5,
             segments: vec![],
             words: vec![],
-            language_confidence: None,
-            utterances: vec![],
             extra: None,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(!json.contains("words"));
-        assert!(!json.contains("language_confidence"));
+        }
     }
 
     #[test]
-    fn verbose_response_includes_language_confidence() {
-        let resp = VerboseJsonResponse {
-            text: "hi".to_string(),
-            language: "en".to_string(),
-            duration: 1.0,
-            segments: vec![],
-            words: vec![],
-            language_confidence: Some(0.8),
-            utterances: vec![],
-            extra: None,
-        };
-        let json: serde_json::Value = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["language_confidence"], 0.8);
+    fn verbose_response_omits_empty_words() {
+        let json = serde_json::to_string(&verbose(Some("en"))).unwrap();
+        assert!(!json.contains("words"));
+    }
+
+    /// The fields clients read from `verbose_json`: text,
+    /// language (echoed hint), duration.
+    #[test]
+    fn verbose_response_keeps_the_fields_clients_read() {
+        let json = serde_json::to_value(verbose(Some("ru"))).unwrap();
+        assert_eq!(json["text"], "hi");
+        assert_eq!(json["language"], "ru");
+        assert_eq!(json["duration"], 1.5);
+        assert!(json["segments"].is_array());
+    }
+
+    /// No hint, no language: the model does not report one and none is made up.
+    #[test]
+    fn verbose_response_has_no_language_when_none_was_given() {
+        let json = serde_json::to_value(verbose(None)).unwrap();
+        assert!(json.get("language").is_none(), "{json}");
     }
 
     #[test]
@@ -177,17 +241,7 @@ mod tests {
 
     #[test]
     fn verbose_response_omits_null_extra() {
-        let resp = VerboseJsonResponse {
-            text: "hi".to_string(),
-            language: "en".to_string(),
-            duration: 1.0,
-            language_confidence: None,
-            segments: vec![],
-            words: vec![],
-            utterances: vec![],
-            extra: None,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
+        let json = serde_json::to_value(verbose(Some("en"))).unwrap();
         assert!(json.get("extra").is_none());
     }
 }

@@ -8,18 +8,17 @@
 |------|------|
 | `src/main.rs` | Axum server, route wiring |
 | `src/config.rs` | Environment config |
-| `src/handlers.rs` · `src/handler_openai.rs` · `src/handler_stream.rs` | HTTP handlers (native, OpenAI-compatible, SSE) |
+| `src/handlers.rs` · `src/handler_openai.rs` | `/health`; the OpenAI-compatible transcription endpoint |
 | `src/ws_handler.rs` · `src/ws_session.rs` | WebSocket streaming |
-| `src/routing.rs` | Which engine serves a language (Parakeet / RU model / Moonshine) |
-| `src/transcribe.rs` · `src/streaming.rs` | Transcription engine: VAD or chunk split, bounded batch decode, punctuation |
-| `src/models.rs` · `src/recognizer.rs` | Model loading, fallbacks after a failed reload |
-| `src/pool.rs` | Recognizer pools: bounded-wait `acquire`, idle eviction |
+| `src/language.rs` | The language hint: validated against Parakeet's 25 languages, else 400 |
+| `src/transcribe.rs` | Transcription engine: VAD or chunk split, bounded batch decode |
+| `src/models.rs` | Loads Parakeet + VAD; refuses to start without Parakeet |
+| `src/pool.rs` | Recognizer pool: bounded-wait `acquire`, opt-in idle eviction, `is_healthy` |
 | `src/vad.rs` | Shared Silero VAD (reset per request, poison recovery) |
-| `src/detect.rs` | Language auto-detection |
-| `src/chunking.rs` | Text helpers (`sanitize_utf8`, `split_text`); the audio split `split_audio_chunks` is in `transcribe.rs` |
+| `src/tmpfile.rs` | `TempFile`: owns an upload / ffmpeg temp file, removes it on drop |
+| `src/chunking.rs` | Text helpers (`sanitize_utf8`); the audio split `split_audio_chunks` is in `transcribe.rs` |
 | `src/audio.rs` | Audio format conversion (ffmpeg) |
-| `src/punctuate.rs` | Punctuation restoration |
-| `src/smart_format/` · `pii.rs` · `paragraphs.rs` · `spelling.rs` · `diarize.rs` | Post-processing options |
+| `src/smart_format/` · `pii.rs` · `paragraphs.rs` · `spelling.rs` | Post-processing options (pure text transforms) |
 | `vendor/sherpa-rs/` | Vendored sherpa-onnx Rust bindings |
 
 ## API
@@ -30,10 +29,11 @@
 
 ## Models
 
-Parakeet TDT 0.6B v3 (fp32) serves 25 European languages, `ru` and `en` included, with its
-own case and punctuation; Zipformer/GigaAM serve `ru` only when Parakeet does not; everything
-else goes to the single Moonshine model, which the stock download makes English-only (#58).
-Models load at startup from mounted volumes. Benchmarks: README and `docs/benchmarks.md`.
+One model: Parakeet TDT 0.6B v3 (fp32) serves 25 European languages with its own case and
+punctuation, and transcribes whatever language it hears. `language` is a hint that is checked
+(unsupported -> 400, never decoded) and echoed, not a route. The service exits at startup if
+Parakeet does not load. Silero VAD is the only other model. Benchmarks: README and
+`docs/benchmarks.md`.
 
 ## Deploy
 
@@ -42,9 +42,10 @@ compose runs `:latest` unless `OX_WHISPER_VERSION` pins one. To run a local buil
 `image:` at the tag (or use a compose with a `build:` section), then
 `docker compose up -d --no-deps ox-whisper`.
 
-With Parakeet the container needs `working_dir` = the Parakeet directory, about 7 GB of
-`mem_limit`, `PARAKEET_POOL_SIZE=1` and `PARAKEET_IDLE_EVICT_SECS=0` (see README, Languages).
-`PARAKEET_LANGS=off` rolls back to the old models without a rebuild.
+The container needs `working_dir` = the Parakeet directory (the fp32 encoder resolves
+`encoder.weights` from the working directory), about 7 GB of `mem_limit`,
+`PARAKEET_POOL_SIZE=1` and `PARAKEET_IDLE_EVICT_SECS=0` (see README, Languages). Rollback is the
+previous image tag.
 
 ## Gotchas
 
@@ -54,5 +55,7 @@ With Parakeet the container needs `working_dir` = the Parakeet directory, about 
 - The Silero VAD is one process-wide instance: anything that feeds it must go through
   `lock_vad()` + `apply_vad()`, which resets it first — state carried between requests once
   produced empty transcripts
+- Anything that writes an upload or a conversion to disk owns it through `TempFile`; never
+  `std::fs::write` a path and remove it by hand (a cancelled handler skips the removal)
 - Waiting `pool.acquire()` blocks for up to `POOL_ACQUIRE_TIMEOUT_S`: call it only from
   `spawn_blocking`, never on an async task (use `try_acquire()` there)

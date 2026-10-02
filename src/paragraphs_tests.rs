@@ -6,7 +6,6 @@ fn w(word: &str, start: f32, end: f32) -> WordTimestamp {
         start,
         end,
         confidence: None,
-        speaker: None,
     }
 }
 

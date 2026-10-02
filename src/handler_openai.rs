@@ -172,6 +172,13 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde
             "owned_by": "ox-whisper",
         }));
     }
+    if state.models.parakeet.is_some() {
+        data.push(serde_json::json!({
+            "id": crate::recognizer::PARAKEET_MODEL_NAME,
+            "object": "model",
+            "owned_by": "ox-whisper",
+        }));
+    }
     if state.models.ru.is_some() {
         data.push(serde_json::json!({
             "id": state.models.ru_model_name,

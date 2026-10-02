@@ -8,6 +8,20 @@ pub struct Config {
     pub models_dir: String,
     /// Russian models directory (ZIPFORMER_RU_DIR, default: "/ru-models")
     pub ru_models_dir: String,
+    /// Parakeet TDT v3 model directory (PARAKEET_DIR, default: "/parakeet-models")
+    pub parakeet_dir: String,
+    /// Languages routed to Parakeet (PARAKEET_LANGS, comma-separated, default:
+    /// the 25 European languages Parakeet TDT v3 covers). An empty value or
+    /// `off` disables Parakeet: it is not loaded and every language falls back
+    /// to the Zipformer (ru) / Moonshine (other) route — a rollback without a
+    /// rebuild.
+    pub parakeet_langs: Vec<String>,
+    /// Idle-eviction threshold for Parakeet, seconds
+    /// (PARAKEET_IDLE_EVICT_SECS, default: OX_WHISPER_IDLE_EVICT_SECS, 0 = never)
+    pub parakeet_idle_evict_secs: u64,
+    /// Parakeet recognizer instances (PARAKEET_POOL_SIZE, default: POOL_SIZE).
+    /// Each instance holds its own ~1.1 GB encoder session.
+    pub parakeet_pool_size: usize,
     /// Silero VAD model path (SILERO_VAD_MODEL, default: "/vad/silero_vad.onnx")
     pub vad_model: String,
     /// Punctuation model path (PUNCT_MODEL, default: "/punct/model.int8.onnx")
@@ -89,6 +103,36 @@ pub struct TtsConfig {
     pub upstream_url: Option<String>,
 }
 
+/// Languages Parakeet TDT 0.6B v3 transcribes (its model card's 25 European
+/// languages), as ISO 639-1 codes.
+pub const PARAKEET_V3_LANGS: &[&str] = &[
+    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt",
+    "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
+];
+
+/// Parses `PARAKEET_LANGS`. Unset → every Parakeet v3 language; empty or
+/// `off`/`none` → no language (Parakeet disabled).
+pub fn parse_parakeet_langs(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return PARAKEET_V3_LANGS.iter().map(|l| l.to_string()).collect();
+    };
+    let trimmed = raw.trim().to_lowercase();
+    if matches!(trimmed.as_str(), "" | "off" | "none") {
+        return Vec::new();
+    }
+    let mut langs: Vec<String> = Vec::new();
+    for lang in trimmed.split(',').map(str::trim).filter(|l| !l.is_empty()) {
+        if !PARAKEET_V3_LANGS.contains(&lang) {
+            tracing::warn!("PARAKEET_LANGS: '{lang}' is not a Parakeet v3 language; ignoring it");
+            continue;
+        }
+        if !langs.iter().any(|l| l == lang) {
+            langs.push(lang.to_string());
+        }
+    }
+    langs
+}
+
 /// Parses a numeric env var with a minimum. An unparsable or too-small value
 /// warns and falls back to `default` — the repo's config convention.
 fn env_num<T>(name: &str, min: T, default: T) -> T
@@ -154,11 +198,23 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(9092);
+        let idle_evict_secs = env::var("OX_WHISPER_IDLE_EVICT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let pool_size = env::var("POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
         Self {
             port,
             models_dir: env::var("MOONSHINE_MODELS_DIR").unwrap_or_else(|_| "/models".to_string()),
             ru_models_dir: env::var("ZIPFORMER_RU_DIR")
                 .unwrap_or_else(|_| "/ru-models".to_string()),
+            parakeet_dir: env::var("PARAKEET_DIR")
+                .unwrap_or_else(|_| "/parakeet-models".to_string()),
+            parakeet_langs: parse_parakeet_langs(env::var("PARAKEET_LANGS").ok().as_deref()),
+            parakeet_pool_size: env_num("PARAKEET_POOL_SIZE", 1, pool_size.max(1)),
             vad_model: env::var("SILERO_VAD_MODEL")
                 .unwrap_or_else(|_| "/vad/silero_vad.onnx".to_string()),
             punct_model: env::var("PUNCT_MODEL")
@@ -176,10 +232,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0),
-            pool_size: env::var("POOL_SIZE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(2),
+            pool_size,
             pool_acquire_timeout_s: env_num("POOL_ACQUIRE_TIMEOUT_S", 0, 30),
             vad_threshold: env::var("VAD_THRESHOLD")
                 .ok()
@@ -219,10 +272,8 @@ impl Config {
             diarize_embedding_model: env::var("DIARIZE_EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "/diarize/embedding.onnx".to_string()),
             prom_port,
-            idle_evict_secs: env::var("OX_WHISPER_IDLE_EVICT_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            idle_evict_secs,
+            parakeet_idle_evict_secs: env_num("PARAKEET_IDLE_EVICT_SECS", 0, idle_evict_secs),
             tts: TtsConfig::from_env(port, prom_port),
         }
     }

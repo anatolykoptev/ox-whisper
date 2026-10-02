@@ -25,6 +25,8 @@ pub mod names {
     pub const POOL_MUTEX_POISONED: &str = "oxwhisper_pool_mutex_poisoned_total";
     /// Time an acquire waited for a busy pool slot (only waits are recorded).
     pub const POOL_ACQUIRE_WAIT: &str = "oxwhisper_pool_acquire_wait_seconds";
+    /// Requests served by a fallback model because Parakeet failed to reload.
+    pub const ROUTE_FALLBACK: &str = "oxwhisper_route_fallback_total";
     /// Acquires that gave up after the bounded wait (→ request error).
     pub const POOL_ACQUIRE_TIMEOUTS: &str = "oxwhisper_pool_acquire_timeouts_total";
     // Referenced only from tts::supervisor — dead in the bin target until the

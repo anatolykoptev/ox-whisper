@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::metrics::names as metric_names;
 use crate::pool::EvictablePool;
 use crate::recognizer::RuRecognizer;
+use crate::routing::Engine;
 
 pub struct Models {
     pub en: Option<std::sync::Arc<EvictablePool<MoonshineRecognizer>>>,
@@ -21,6 +22,8 @@ pub struct Models {
     /// The RU model punctuates itself (GigaAM v3 transducer): the external
     /// punctuation model is skipped for `ru` on every path.
     pub ru_builtin_punct: bool,
+    /// Parakeet TDT v3 — serves the languages in `PARAKEET_LANGS`.
+    pub parakeet: Option<std::sync::Arc<EvictablePool<RuRecognizer>>>,
     pub vad: Option<Mutex<SileroVad>>,
     pub punct: Option<Mutex<OnlinePunctuation>>,
     pub diarize: Option<crate::diarize::DiarizeEngine>,
@@ -39,7 +42,20 @@ impl Drop for Models {
 impl Models {
     pub fn load(config: &Config) -> Self {
         let en = load_moonshine(config);
-        let ru = load_ru(config);
+        let parakeet = if config.parakeet_langs.is_empty() {
+            tracing::info!("Parakeet disabled (PARAKEET_LANGS is empty or off)");
+            None
+        } else {
+            load_parakeet(config)
+        };
+        // Do not keep a second RU model resident when Parakeet already serves
+        // Russian. If Parakeet failed to load, RU falls back to its own model.
+        let ru = if !needs_ru_model(parakeet.is_some(), &config.parakeet_langs) {
+            tracing::info!("RU is served by Parakeet; RU model not loaded");
+            None
+        } else {
+            load_ru(config)
+        };
         let vad = load_vad(config);
         let punct = load_punctuation(config);
         let diarize = crate::diarize::DiarizeEngine::load(
@@ -49,6 +65,7 @@ impl Models {
 
         warmup(&en, "EN");
         warmup(&ru, "RU");
+        warmup(&parakeet, "Parakeet");
         let (ru_model_name, ru_builtin_punct) = ru
             .as_ref()
             .and_then(|p| p.try_acquire().ok())
@@ -81,12 +98,22 @@ impl Models {
                 eviction_handles.push(pool.spawn_eviction_loop(tick));
             }
         }
+        // Parakeet has its own threshold (PARAKEET_IDLE_EVICT_SECS): reloading
+        // its encoder is slow and can fail where the small models would not.
+        if let Some(ref pool) = parakeet
+            && config.parakeet_idle_evict_secs > 0
+        {
+            let quarter = std::time::Duration::from_secs(config.parakeet_idle_evict_secs / 4);
+            let tick = quarter.max(std::time::Duration::from_secs(5));
+            eviction_handles.push(pool.spawn_eviction_loop(tick));
+        }
 
         Self {
             en,
             ru,
             ru_model_name,
             ru_builtin_punct,
+            parakeet,
             vad,
             punct,
             diarize,
@@ -103,12 +130,63 @@ impl Models {
             ru: None,
             ru_model_name: "none",
             ru_builtin_punct: false,
+            parakeet: None,
             vad: None,
             punct: None,
             diarize: None,
             eviction_handles: Vec::new(),
         }
     }
+
+    /// The engine that serves `language` with the models actually loaded.
+    pub fn route(&self, language: &str, parakeet_langs: &[String]) -> Engine {
+        Engine::route(language, self.parakeet.is_some(), parakeet_langs)
+    }
+
+    /// The batch-decoded pool behind `engine`; `None` for Moonshine, whose
+    /// pool has a different type (`self.en`).
+    pub fn offline_pool(
+        &self,
+        engine: Engine,
+    ) -> Option<&std::sync::Arc<EvictablePool<RuRecognizer>>> {
+        match engine {
+            Engine::Parakeet => self.parakeet.as_ref(),
+            Engine::Ru => self.ru.as_ref(),
+            Engine::Moonshine => None,
+        }
+    }
+}
+
+impl Models {
+    /// The engine a language falls back to when Parakeet cannot reload: the
+    /// route without Parakeet, if that model is loaded.
+    pub fn reload_fallback(&self, language: &str, parakeet_langs: &[String]) -> Option<Engine> {
+        reload_fallback(
+            language,
+            parakeet_langs,
+            self.ru.is_some(),
+            self.en.is_some(),
+        )
+    }
+}
+
+fn reload_fallback(
+    language: &str,
+    parakeet_langs: &[String],
+    ru_loaded: bool,
+    en_loaded: bool,
+) -> Option<Engine> {
+    match Engine::route(language, false, parakeet_langs) {
+        Engine::Ru if ru_loaded => Some(Engine::Ru),
+        Engine::Moonshine if en_loaded => Some(Engine::Moonshine),
+        _ => None,
+    }
+}
+
+/// Whether the RU model has to be loaded: always, unless Parakeet is loaded
+/// and routes `ru` itself.
+fn needs_ru_model(parakeet_loaded: bool, parakeet_langs: &[String]) -> bool {
+    Engine::route("ru", parakeet_loaded, parakeet_langs) != Engine::Parakeet
 }
 
 fn load_moonshine(config: &Config) -> Option<std::sync::Arc<EvictablePool<MoonshineRecognizer>>> {
@@ -179,6 +257,142 @@ fn load_moonshine(config: &Config) -> Option<std::sync::Arc<EvictablePool<Moonsh
         ));
     metrics::gauge!(metric_names::POOL_SIZE, "lang" => "en").set(size as f64);
     Some(std::sync::Arc::new(pool))
+}
+
+/// Loads Parakeet TDT 0.6B v3 from a sherpa-onnx export: `encoder`, `decoder`
+/// and `joiner` as `.int8.onnx` (preferred) or `.onnx` (fp32; the encoder's
+/// weights sit next to it in `encoder.weights`), plus `tokens.txt`.
+/// The model type is fixed here — never inferred by reading the multi-GB
+/// encoder into memory, which `detect_transducer_type` would do.
+fn load_parakeet(config: &Config) -> Option<std::sync::Arc<EvictablePool<RuRecognizer>>> {
+    let dir = &config.parakeet_dir;
+    let encoder = find_model_file(dir, "encoder");
+    if !Path::new(&encoder).exists() {
+        tracing::warn!(
+            "Parakeet model not found at {dir}; {:?} fall back to the RU/Moonshine models",
+            config.parakeet_langs
+        );
+        return None;
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let unresolved = unresolved_external_data(Path::new(&encoder), &cwd);
+    if !unresolved.is_empty() {
+        tracing::error!(
+            "Parakeet: {encoder} keeps its weights in {unresolved:?}, which onnxruntime \
+             resolves from the working directory ({}); run the container with \
+             working_dir {dir}. Parakeet not loaded",
+            cwd.display()
+        );
+        return None;
+    }
+    let variant = if encoder.ends_with(".int8.onnx") {
+        "int8"
+    } else {
+        "fp32/fp16"
+    };
+    tracing::info!("Parakeet encoder {encoder} ({variant})");
+    let cfg = TransducerConfig {
+        encoder,
+        decoder: find_model_file(dir, "decoder"),
+        joiner: find_model_file(dir, "joiner"),
+        tokens: format!("{dir}/tokens.txt"),
+        num_threads: config.num_threads,
+        sample_rate: 16000,
+        // Parakeet uses 128 mel bins; sherpa-onnx also reads `feat_dim` from
+        // the encoder metadata and overrides this value.
+        feature_dim: 128,
+        decoding_method: "greedy_search".to_string(),
+        model_type: "nemo_transducer".to_string(),
+        provider: Some(config.provider.clone()),
+        ..Default::default()
+    };
+    let mut recognizers = Vec::new();
+    for i in 0..config.parakeet_pool_size {
+        match TransducerRecognizer::new(cfg.clone()) {
+            Ok(r) => {
+                tracing::info!(
+                    "Parakeet recognizer {}/{} loaded",
+                    i + 1,
+                    config.parakeet_pool_size
+                );
+                recognizers.push(RuRecognizer::Parakeet(r));
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Parakeet recognizer {}/{} failed: {}",
+                    i + 1,
+                    config.parakeet_pool_size,
+                    e
+                );
+                break;
+            }
+        }
+    }
+    if recognizers.is_empty() {
+        return None;
+    }
+    let size = recognizers.len();
+    let factory: std::sync::Arc<dyn Fn() -> Result<RuRecognizer, anyhow::Error> + Send + Sync> =
+        std::sync::Arc::new(move || {
+            TransducerRecognizer::new(cfg.clone())
+                .map(RuRecognizer::Parakeet)
+                .map_err(|e| anyhow::anyhow!("Parakeet reinit failed: {e}"))
+        });
+    let pool = EvictablePool::from_items(recognizers, config.parakeet_idle_evict_secs, factory)
+        .with_acquire_timeout(std::time::Duration::from_secs(
+            config.pool_acquire_timeout_s,
+        ));
+    metrics::gauge!(metric_names::POOL_SIZE, "lang" => Engine::Parakeet.label()).set(size as f64);
+    Some(std::sync::Arc::new(pool))
+}
+
+/// Files beside `encoder` that it references as external data and that
+/// onnxruntime would not find. sherpa-onnx 1.12.28 hands onnxruntime the model
+/// as a byte buffer, so external data (the fp32 export's `encoder.weights`, or
+/// `*.onnx.data`) is looked up relative to the process working directory, not
+/// the model directory — and a miss throws through the C API and aborts the
+/// process. An encoder references a file by name, so any sibling whose name
+/// occurs in the encoder's bytes counts. Encoders over 512 MiB are
+/// self-contained (int8): their weights are inline.
+fn unresolved_external_data(encoder: &Path, cwd: &Path) -> Vec<String> {
+    const MAX_GRAPH_BYTES: u64 = 512 << 20;
+    let Some(dir) = encoder.parent() else {
+        return Vec::new();
+    };
+    match std::fs::metadata(encoder) {
+        Ok(m) if m.len() <= MAX_GRAPH_BYTES => {}
+        _ => return Vec::new(),
+    }
+    let Ok(graph) = std::fs::read(encoder) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut unresolved = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if path == encoder || !path.is_file() || !contains(&graph, name.as_bytes()) {
+            continue;
+        }
+        let seen = cwd.join(name);
+        let same = match (seen.canonicalize(), path.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if !same {
+            unresolved.push(name.to_string());
+        }
+    }
+    unresolved.sort();
+    unresolved
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 fn load_ru(config: &Config) -> Option<std::sync::Arc<EvictablePool<RuRecognizer>>> {
@@ -421,5 +635,120 @@ impl Warmable for MoonshineRecognizer {
 impl Warmable for RuRecognizer {
     fn warmup(&mut self) {
         let _ = self.transcribe(16000, &[0.0f32; 16000]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::parse_parakeet_langs;
+
+    #[test]
+    fn ru_model_is_skipped_only_when_parakeet_is_loaded_and_routes_ru() {
+        let all = parse_parakeet_langs(None);
+        assert!(!needs_ru_model(true, &all));
+        // Parakeet missing → the RU model must still load.
+        assert!(needs_ru_model(false, &all));
+        // Parakeet loaded but `ru` not routed to it.
+        assert!(needs_ru_model(true, &parse_parakeet_langs(Some("en,uk"))));
+        // Rollback switch.
+        assert!(needs_ru_model(false, &parse_parakeet_langs(Some("off"))));
+    }
+
+    #[test]
+    fn missing_parakeet_dir_loads_nothing_and_routes_to_old_models() {
+        let missing = std::env::temp_dir()
+            .join(format!("oxw-no-models-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let mut config = Config::from_env();
+        config.parakeet_dir = missing.clone();
+        config.parakeet_langs = parse_parakeet_langs(None);
+        config.models_dir = missing.clone();
+        config.ru_models_dir = missing.clone();
+        config.vad_model = format!("{missing}/vad.onnx");
+        config.punct_model = format!("{missing}/punct.onnx");
+        config.idle_evict_secs = 0;
+        let models = Models::load(&config);
+        assert!(models.parakeet.is_none());
+        assert_eq!(models.route("ru", &config.parakeet_langs), Engine::Ru);
+        assert_eq!(
+            models.route("en", &config.parakeet_langs),
+            Engine::Moonshine
+        );
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("oxw-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// An fp32 encoder referencing `encoder.weights`: unresolvable from an
+    /// unrelated working directory, resolvable from the model directory.
+    #[test]
+    fn external_weights_must_resolve_from_the_working_directory() {
+        let model = scratch("p32-model");
+        let elsewhere = scratch("p32-cwd");
+        let encoder = model.join("encoder.onnx");
+        std::fs::write(&encoder, b"\x08\x01location\x12\x0fencoder.weights").unwrap();
+        std::fs::write(model.join("encoder.weights"), b"w").unwrap();
+        std::fs::write(model.join("tokens.txt"), b"t").unwrap();
+
+        assert_eq!(
+            unresolved_external_data(&encoder, &elsewhere),
+            vec!["encoder.weights".to_string()]
+        );
+        // A different file of the same name in the working directory is not it.
+        std::fs::write(elsewhere.join("encoder.weights"), b"other").unwrap();
+        assert_eq!(unresolved_external_data(&encoder, &elsewhere).len(), 1);
+        // Positive case: the container runs with working_dir = model dir.
+        assert!(unresolved_external_data(&encoder, &model).is_empty());
+
+        for f in ["encoder.onnx", "encoder.weights", "tokens.txt"] {
+            std::fs::remove_file(model.join(f)).unwrap();
+        }
+        std::fs::remove_file(elsewhere.join("encoder.weights")).unwrap();
+        std::fs::remove_dir(&model).unwrap();
+        std::fs::remove_dir(&elsewhere).unwrap();
+    }
+
+    /// Any external-data name counts (`*.onnx.data`), and a self-contained
+    /// encoder that references nothing passes.
+    #[test]
+    fn onnx_data_sidecars_count_and_self_contained_encoders_pass() {
+        let model = scratch("p16-model");
+        let elsewhere = scratch("p16-cwd");
+        let encoder = model.join("encoder.onnx");
+        std::fs::write(&encoder, b"location encoder.onnx.data").unwrap();
+        std::fs::write(model.join("encoder.onnx.data"), b"w").unwrap();
+        assert_eq!(
+            unresolved_external_data(&encoder, &elsewhere),
+            vec!["encoder.onnx.data".to_string()]
+        );
+        let int8 = model.join("encoder.int8.onnx");
+        std::fs::write(&int8, b"self-contained graph").unwrap();
+        assert!(unresolved_external_data(&int8, &elsewhere).is_empty());
+
+        for f in ["encoder.onnx", "encoder.onnx.data", "encoder.int8.onnx"] {
+            std::fs::remove_file(model.join(f)).unwrap();
+        }
+        std::fs::remove_dir(&model).unwrap();
+        std::fs::remove_dir(&elsewhere).unwrap();
+    }
+
+    #[test]
+    fn parakeet_reload_failure_falls_back_to_the_model_without_parakeet() {
+        let all = parse_parakeet_langs(None);
+        // en → Moonshine when it is loaded.
+        assert_eq!(
+            reload_fallback("en", &all, false, true),
+            Some(Engine::Moonshine)
+        );
+        // ru → the RU model only when one is loaded; otherwise no fallback.
+        assert_eq!(reload_fallback("ru", &all, true, true), Some(Engine::Ru));
+        assert_eq!(reload_fallback("ru", &all, false, true), None);
+        // Nothing loaded → no fallback.
+        assert_eq!(reload_fallback("en", &all, false, false), None);
     }
 }

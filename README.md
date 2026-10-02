@@ -140,14 +140,20 @@ curl -N -F file=@long.mp3 -F language=en http://localhost:8092/transcribe/stream
 
 | Code | Language   | Model |
 |------|------------|-------|
-| `en` | English    | Moonshine v2 Base |
-| `ru` | Russian    | GigaAM v3 / Zipformer-RU INT8 (auto-detected) |
-| `ar` | Arabic     | Moonshine v2 Base |
-| `es` | Spanish    | Moonshine v2 Base |
-| `ja` | Japanese   | Moonshine v2 Base |
-| `uk` | Ukrainian  | Moonshine v2 Base |
-| `vi` | Vietnamese | Moonshine v2 Base |
-| `zh` | Chinese    | Moonshine v2 Base |
+| `en`, `ru`, `uk`, `es` and the other European languages Parakeet v3 covers (`bg cs da de el es et fi fr hr hu it lt lv mt nl pl pt ro ru sk sl sv uk`) | | Parakeet TDT 0.6B v3, when `PARAKEET_DIR` holds the model |
+| `ru` (Parakeet absent, or `ru` left out of `PARAKEET_LANGS`) | Russian | GigaAM / Zipformer-RU from `ZIPFORMER_RU_DIR` |
+| `ar`, `ja`, `vi`, `zh`, and `en`/`es`/`uk` without Parakeet | | Moonshine v2 Base |
+
+Parakeet is language-agnostic: a request sent with `language=ru` that carries English speech
+is transcribed as English. It writes case and punctuation itself, so its output skips the
+CNN-BiLSTM punctuation model. Set `PARAKEET_LANGS=off` to go back to the old models without a
+rebuild (recreate the container).
+
+**Parakeet memory and files.** The fp32 export is an `encoder.onnx` graph plus `encoder.weights`;
+onnxruntime resolves the weights from the process working directory, so run the container with
+`working_dir` set to the Parakeet directory (the loader refuses, and the languages fall back, if
+it cannot). Size `mem_limit` for about 3.2 GB idle per `PARAKEET_POOL_SIZE` slot plus decode
+buffers; see the measurements in the pull request that added it.
 
 **Need 99 languages?** Use `whisper-large-v3` instead — ox-whisper trades coverage for speed and CPU footprint.
 
@@ -187,6 +193,10 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | `MOONSHINE_MODELS_DIR` | `/models` |
 | `ZIPFORMER_RU_DIR` | `/ru-models` |
 | `POOL_ACQUIRE_TIMEOUT_S` | `30` — how long a request waits for a busy recognizer |
+| `PARAKEET_DIR` | `/parakeet-models` |
+| `PARAKEET_LANGS` | all 25 Parakeet v3 languages; `off` disables Parakeet |
+| `PARAKEET_POOL_SIZE` | `POOL_SIZE` |
+| `PARAKEET_IDLE_EVICT_SECS` | `OX_WHISPER_IDLE_EVICT_SECS` — `0` keeps Parakeet resident |
 | `SILERO_VAD_MODEL` | `/vad/silero_vad.onnx` |
 | `PUNCT_MODEL` | `/punct/model.int8.onnx` |
 | `PUNCT_VOCAB` | `/punct/bpe.vocab` |
@@ -211,6 +221,8 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | Moonshine v2 Base | AR · EN · ES · JA · UK · VI · ZH | 135 MB | [HF](https://huggingface.co/csukuangfj2/sherpa-onnx-moonshine-base-en-quantized-2026-02-27) |
 | Zipformer-RU INT8 | RU | 67 MB | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases) |
 | GigaAM v3 RNNT | RU | ~220 MB | [HF](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16) |
+| GigaAM v3 CTC punct | RU | 215 MB | [HF](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-punct-giga-am-v3-russian-2025-12-16) |
+| Parakeet TDT 0.6B v3 (fp32) | 25 European languages | 2.5 GB | [HF](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3) |
 | Silero VAD | — | 0.6 MB | bundled |
 | Punctuation CNN-BiLSTM | EN, RU | 7 MB | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases) |
 
@@ -241,6 +253,7 @@ scrape_configs:
 | `oxwhisper_vad_mutex_poisoned_total` | counter | — |
 | `oxwhisper_pool_acquire_wait_seconds` | histogram | — |
 | `oxwhisper_pool_acquire_timeouts_total` | counter | — |
+| `oxwhisper_route_fallback_total` | counter | `to` — Parakeet failed to reload after eviction |
 | `oxwhisper_hallucination_rejected_total` | counter | `lang` |
 | `oxwhisper_recognizer_pool_size` · `_busy` | gauge | `lang` |
 | `oxwhisper_ws_active_connections` | gauge | — |

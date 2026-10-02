@@ -22,7 +22,7 @@ Built for voice AI agents, live captioning, edge deployments, and privacy-sensit
 | **Protocol** | HTTP + WebSocket | library | library / examples | HTTPS |
 | **OpenAI-compatible API** | yes | no | partial | n/a |
 | **Real-time WebSocket** | yes | no | no | no |
-| **CPU RTF (aarch64, 4 threads)** | ~0.15–0.27 Parakeet · ~0.03 Moonshine | ~0.075 (tiny) | ~0.13 (tiny) | n/a |
+| **CPU RTF (aarch64, 4 threads)** | ~0.14–0.27 Parakeet · ~0.03 Moonshine | ~0.075 (tiny) | ~0.13 (tiny) | n/a |
 | **GPU required** | no | optional | optional | n/a |
 
 ox-whisper wins on a narrow but real wedge: **a polished HTTP/WebSocket server with an OpenAI-compatible API, faster than real time on a CPU, no GPU, ARM64-native.** Pair it with Pipecat / LiveKit / Vapi for self-hosted voice agents.
@@ -256,7 +256,6 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | Moonshine v2 Base | AR · EN · ES · JA · UK · VI · ZH | 135 MB | [HF](https://huggingface.co/csukuangfj2/sherpa-onnx-moonshine-base-en-quantized-2026-02-27) |
 | Zipformer-RU INT8 | RU | 67 MB | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases) |
 | GigaAM v3 RNNT | RU | ~220 MB | [HF](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16) |
-| GigaAM v3 CTC punct | RU | 215 MB | [HF](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-punct-giga-am-v3-russian-2025-12-16) |
 | Parakeet TDT 0.6B v3 (fp32) | 25 European languages | 2.5 GB | [HF](https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3) — CC-BY-4.0 (NVIDIA) |
 | Silero VAD | — | 0.6 MB | bundled |
 | Punctuation CNN-BiLSTM | EN, RU | 7 MB | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases) |
@@ -301,7 +300,7 @@ scrape_configs:
 - **No streaming for `/transcribe`.** Whole-file responses only. Use `/transcribe/stream` (SSE) or `/v1/listen` (WebSocket) for incremental output.
 - **No auth.** Bind to `0.0.0.0`; put behind nginx / Caddy if exposed to the network.
 - **25 languages** (Parakeet), plus English on the Moonshine fallback. For broader coverage, use `whisper-large-v3` via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) or [speaches](https://github.com/speaches-ai/speaches).
-- **Punctuation.** Parakeet writes case and punctuation for its 25 languages. Without Parakeet, the CNN-BiLSTM model punctuates Russian (Zipformer, GigaAM v2) and English output; GigaAM v3 punctuates itself.
+- **Punctuation.** Parakeet writes case and punctuation for its 25 languages. Without Parakeet, the CNN-BiLSTM model punctuates Russian output (Zipformer, GigaAM CTC) and, on the SSE and WebSocket paths only, English; GigaAM v3 RNNT punctuates itself.
 - **Memory.** Parakeet holds ~3.2 GB and peaks at ~4.3 GB on 5-minute audio. On a small box (Raspberry Pi 5, 4 GB) skip it with `OX_WHISPER_PARAKEET=0`.
 
 ---

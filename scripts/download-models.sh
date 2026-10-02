@@ -81,6 +81,10 @@ sha256_of() {
     exit 1
   fi
 }
+command -v sha256sum >/dev/null || command -v shasum >/dev/null || {
+  printf 'need sha256sum or shasum to verify the downloads\n' >&2
+  exit 1
+}
 # A file that exists but fails its hash (an older or damaged copy) is fetched
 # again once in the same run; a fresh download that still fails stops the run.
 fetch_sha() {

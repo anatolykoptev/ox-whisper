@@ -21,6 +21,8 @@ Server: ARM64 (Oracle Cloud A1.Flex), 4 vCPU, 24 GB RAM, CPU-only, a shared box 
 | Parakeet fp16 (third-party export) | 7.65% | 9.93% | 2 | 0.21 | 3.1 / 4.1 GB |
 | GigaAM v3 CTC punct, VAD off (RU only) | 4.54% (6.34%) | — | — | 0.05 | 1.25 GB |
 
+¹ Measured on this build under varying load on a shared host: 0.14 in the #52 run, 0.18 (EN) and 0.27 (RU) in the post-deploy probe. Upstream sherpa-onnx (pip) ran the same model at 0.17–0.18 on an idle host.
+
 **5-minute concatenated files, VAD on.**
 
 | Configuration | RU WER | EN WER | Peak RSS |
@@ -29,7 +31,7 @@ Server: ARM64 (Oracle Cloud A1.Flex), 4 vCPU, 24 GB RAM, CPU-only, a shared box 
 | Zipformer-RU + Moonshine v2, after #54 | 14.1% | 94.9% | 2.1 GB |
 | Parakeet fp32 | 18.2% | 37.6% | 4.3 GB |
 
-¹ Measured on this build under varying load on a shared host: 0.14 in the #52 run, 0.18 (EN) and 0.27 (RU) in the post-deploy probe. Upstream sherpa-onnx (pip) ran the same model at 0.17–0.18 on an idle host.
+The peak RSS of the two old-model rows is the process high-water mark under the 1.5 GB and 2.5 GB container limits of those runs (the first was swapping), so neither is an uncapped peak.
 
 **Findings.**
 - **The empty results came from the shared Silero VAD.** It carried state from one request to the next, and its 0.5 s `max_speech_duration` shredded speech into short segments. Both are fixed in #54. The Moonshine-only empties on 15–17 s single chunks, noted in the v0.3.0 section below, are a separate limit.

@@ -3,6 +3,8 @@ use sherpa_rs::silero_vad::SileroVad;
 pub struct VadResult {
     pub chunks: Vec<Vec<f32>>,
     pub speech_ms: f64,
+    /// Speech segments the detector found, before grouping into chunks.
+    pub segments: usize,
 }
 
 const WINDOW_SIZE: usize = 512;
@@ -51,6 +53,7 @@ pub fn apply_vad(
         vad.pop();
     }
 
+    let segment_count = segments.len();
     // Calculate total speech duration in ms
     let speech_ms: f64 = segments
         .iter()
@@ -101,13 +104,22 @@ pub fn apply_vad(
     // Clear VAD state for reuse
     vad.clear();
 
-    VadResult { chunks, speech_ms }
+    VadResult {
+        chunks,
+        speech_ms,
+        segments: segment_count,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    // Each fixture is one spoken sentence: 1 segment with sherpa-onnx's
+    // default `max_speech_duration` (20 s), 5 and 8 with the old 0.5 s.
+    const MAX_SEGMENTS_A: usize = 2;
+    const MAX_SEGMENTS_B: usize = 2;
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -170,5 +182,29 @@ mod tests {
         // And the same clip twice in a row gives the same segmentation.
         let again = vad_run(&mut shared, &b);
         assert!(again.chunks == fresh.chunks);
+    }
+
+    /// Each segment is glued to the next with `pad_s` of zeros, so splitting
+    /// one spoken sentence into many short segments inserts silences into
+    /// the middle of words. With a 0.5 s `max_speech_duration` the detector
+    /// ran in its split-the-utterance mode (threshold 0.9, 0.1 s minimum
+    /// silence) for nearly all speech.
+    #[test]
+    fn a_spoken_sentence_is_not_shredded_into_short_segments() {
+        for (name, max_segments) in [
+            ("fleurs_en_a.wav", MAX_SEGMENTS_A),
+            ("fleurs_en_b.wav", MAX_SEGMENTS_B),
+        ] {
+            let r = vad_run(&mut production_vad(), &samples(name));
+            eprintln!(
+                "{name}: {} segment(s), {:.0} ms speech",
+                r.segments, r.speech_ms
+            );
+            assert!(
+                r.segments <= max_segments,
+                "{name}: {} segments, want at most {max_segments}",
+                r.segments
+            );
+        }
     }
 }

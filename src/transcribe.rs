@@ -127,10 +127,11 @@ fn do_transcribe(
                 0.0
             };
             tracing::info!(
-                "VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} chunk(s)",
+                "VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} segment(s), {} chunk(s)",
                 vad_result.speech_ms,
                 total_ms,
                 pct,
+                vad_result.segments,
                 vad_result.chunks.len()
             );
             let ratio = vad_result.speech_ms / total_ms.max(1.0);

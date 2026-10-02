@@ -28,7 +28,10 @@ impl Default for SileroVadConfig {
             model: String::new(),
             min_silence_duration: 0.5,
             min_speech_duration: 0.5,
-            max_speech_duration: 0.5,
+            // sherpa-onnx's own default. Once the buffered utterance exceeds
+            // this, the detector switches to threshold 0.9 and 0.1 s minimum
+            // silence; at 0.5 s that mode was on for nearly all speech.
+            max_speech_duration: 20.0,
             threshold: 0.5,
             sample_rate: 16000,
             window_size: 512,

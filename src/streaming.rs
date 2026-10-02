@@ -32,7 +32,7 @@ pub fn transcribe_streaming(
     tx: tokio::sync::mpsc::Sender<StreamEvent>,
 ) -> Result<TranscribeResult, TranscribeError> {
     let start = Instant::now();
-    let wav = ensure_wav(audio_path)?;
+    let wav = ensure_wav(audio_path, &config.upload_dir)?;
 
     let result = do_transcribe_streaming(models, config, wav.path(), language, vad_override, &tx);
 

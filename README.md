@@ -292,7 +292,8 @@ scrape_configs:
 | `oxwhisper_hallucination_rejected_total` | counter | `lang` |
 | `oxwhisper_recognizer_pool_size` · `_busy` | gauge | `lang` |
 | `oxwhisper_ws_active_connections` | gauge | — |
-| `oxwhisper_ws_buffer_limit_total` | counter | — (sessions closed at `WS_MAX_BUFFER_S`) |
+| `oxwhisper_ws_buffer_limit_total` | counter | — (sessions closed at `WS_MAX_BUFFER_S`, with a 1009 Close frame) |
+| `oxwhisper_ws_interim_skipped_total` | counter | — (interim decodes that could not run; nothing is sent for them) |
 
 ---
 

@@ -109,7 +109,7 @@ async fn run_diarization(
     result: &mut transcribe::TranscribeResult,
     num_speakers: Option<i32>,
 ) {
-    if let Ok(wav) = audio::ensure_wav(file_path) {
+    if let Ok(wav) = audio::ensure_wav(file_path, &state.config.upload_dir) {
         if let Ok((samples, _)) = audio::load_wav(wav.path()) {
             let diarize_state = state.clone();
             let mut words = std::mem::take(&mut result.words);
@@ -190,7 +190,8 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde
 // --- internals ---
 
 fn detect_language_from_file(state: &Arc<AppState>, path: &Path) -> DetectResult {
-    let wav_result = audio::ensure_wav(path).and_then(|wav| audio::load_wav(wav.path()));
+    let wav_result = audio::ensure_wav(path, &state.config.upload_dir)
+        .and_then(|wav| audio::load_wav(wav.path()));
     match wav_result {
         Ok((samples, _)) => detect_language(&state.models, &samples),
         Err(e) => {

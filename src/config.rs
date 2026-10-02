@@ -72,6 +72,10 @@ pub struct Config {
     /// Longest audio a WebSocket session may buffer, seconds (WS_MAX_BUFFER_S,
     /// default: 120). Past it the session gets an error and is closed.
     pub ws_max_buffer_s: usize,
+    /// Test-only: how long `transcribe` stalls before reading its input, so a
+    /// test can drop the handler while the blocking job is running.
+    #[cfg(test)]
+    pub decode_delay: std::time::Duration,
     /// Text-to-speech child process settings (TTS_* env vars)
     pub tts: TtsConfig,
 }
@@ -266,6 +270,8 @@ impl Config {
             idle_evict_secs,
             upload_dir: env::temp_dir(),
             ws_max_buffer_s: env_num(get, "WS_MAX_BUFFER_S", 1, 120),
+            #[cfg(test)]
+            decode_delay: std::time::Duration::ZERO,
             parakeet_idle_evict_secs: env_num(
                 get,
                 "PARAKEET_IDLE_EVICT_SECS",

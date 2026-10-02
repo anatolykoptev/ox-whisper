@@ -44,8 +44,8 @@ DX-улучшения от конкурентов + исправление ба�
 - [x] `custom_spelling` — пользовательские замены слов с поддержкой пунктуации (7 тестов)
 - [x] Word timestamps fallback — proportional estimation для Moonshine v2 (нет нативных timestamps)
 - [x] GitHub Actions release workflow — Docker buildx на нативном aarch64 runner, auto-changelog, GitHub Release
-- [ ] GigaAM v3 RNNT — код готов, нужно подключить модель в Docker
-- [ ] Бенчмарки WER на Golos/CommonVoice
+- [ ] GigaAM v3 RNNT — код готов, модель в Docker не подключена; для `ru` теперь Parakeet (см. раздел v0.6.0 ниже), GigaAM остаётся запасным вариантом без Parakeet
+- [x] Бенчмарки WER — FLEURS ru/en, 100+100 клипов (2026-10, `docs/benchmarks.md`); Golos/CommonVoice — нет
 - [ ] Diarization models в Docker — segmentation.onnx / embedding.onnx не подключены
 
 ## v0.5.0 — Real-Time & Async
@@ -65,7 +65,8 @@ WebSocket streaming + async pipeline. Паттерны от Deepgram (dual flags
 
 Выбор лучшей модели под задачу. Fallback-цепочка как AssemblyAI `speech_models[]`.
 
-- [ ] Parakeet TDT 0.6B INT8 — SOTA качество EN (WER ~8%, 30x RT)
+- [x] Parakeet TDT 0.6B v3 — 25 европейских языков, `ru` и `en` включены, сам ставит регистр и пунктуацию (#52). Взят fp32: int8-экспорт на ~4 п. WER хуже. FLEURS: RU 7.7%, EN 9.7% (было 17.4% / 29.9%)
+- [x] Исправлен общий VAD: состояние между запросами давало пустые ответы; `acquire` ждёт свободный слот вместо 500; `/health` не занимает слот (#54)
 - [ ] SenseVoice — ZH, JA, KO с эмоциями
 - [ ] `model` параметр: `moonshine`, `parakeet`, `gigaam`, `auto`
 - [ ] `speech_models[]` — приоритетный список моделей с fallback (как AssemblyAI)

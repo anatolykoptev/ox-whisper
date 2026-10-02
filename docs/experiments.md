@@ -1,5 +1,40 @@
 # ox-whisper Performance Experiments
 
+## 2026-10-01: Parakeet TDT 0.6B v3, and the empty-transcript bug
+
+### Goal
+
+Replace Zipformer-RU and Moonshine for the European languages with a stronger model, and
+find out why some English requests came back empty.
+
+### Result
+
+Shipped in #54 and #52. Parakeet fp32 now serves the 25 European languages. The numbers are
+in `docs/benchmarks.md`, "2026-10".
+
+### What was tried
+
+| Candidate | Outcome |
+|---|---|
+| Parakeet int8 (`sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`) | Rejected: about 4 WER points worse than fp32, the same in upstream sherpa-onnx 1.13.8, so the export is at fault. |
+| Parakeet fp32 (`…-v3`, `encoder.onnx` + `encoder.weights`) | **Chosen.** It matches the whisper.cpp q8_0 reference within 0.25 points with VAD off. Cost: ~3.2 GB RSS per slot and RTF ~0.2. |
+| Parakeet fp16 (third-party export; the official fp16 repo is empty) | Rejected: on this CPU onnxruntime upcasts it, so it saves no RAM and runs about 50% slower. |
+| GigaAM v2 CTC | RU 7.55%, below GigaAM v3. |
+| GigaAM v3 CTC punct | Best Russian (4.54%), but Russian only. Rejected in favour of one model for every European language. |
+
+### The empty transcripts
+
+- **Cause.** The process-wide Silero VAD was only `clear()`ed between requests. `clear()` drops finished segments but keeps the model state, the sample buffer and a pending segment start, so one request's audio decided how the next was segmented.
+- **Symptom.** 14 of 200 English requests came back empty, all clips over 10 s (the VAD path). 20 of 36 such clips also segmented differently on a second send, which is why repeated requests returned different punctuation.
+- **Fix.** `reset()` before every request.
+- **Second VAD bug.** The vendored `max_speech_duration` default was 0.5 s, against sherpa-onnx's 20 s. It held the detector in its aggressive split mode for nearly all speech.
+
+### Lessons Learned
+
+1. **A component shared across requests must be reset per request, not just drained.** Nothing failed loudly here: the only signal was an empty transcript.
+2. **Measure an ONNX export before trusting its precision label.** int8 and fp32 of the same model differed by 4 WER points.
+3. **A reload after idle eviction doubled Parakeet's RSS.** Evicting a large model is not free memory.
+
 ## 2026-03-08: sherpa-onnx v1.12.28 Update + GigaAM v3 Architecture
 
 ### Goal

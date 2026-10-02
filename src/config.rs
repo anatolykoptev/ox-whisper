@@ -126,7 +126,12 @@ where
 pub const MAX_CHUNK_CEILING_S: usize = 60;
 
 /// `MAX_CHUNK_S`: 1..=`max`; zero, unparsable or too large warns and uses `default`.
-fn env_window(get: &dyn Fn(&str) -> Option<String>, name: &str, default: usize, max: usize) -> usize {
+fn env_window(
+    get: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    default: usize,
+    max: usize,
+) -> usize {
     let n = env_num(get, name, 1, default);
     if n > max {
         tracing::warn!("{name}={n} too large (want <= {max}); using default {default}");

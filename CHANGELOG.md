@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.9.0](https://github.com/anatolykoptev/ox-whisper/compare/v0.8.3...v0.9.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* POST /transcribe, /transcribe/upload and /transcribe/stream are removed (404). An unknown response_format is HTTP 400 instead of json. /v1/listen answers 400 to a sample_rate other than 16000.
+* Moonshine, the Zipformer/GigaAM `ru` path and the English punctuation model are removed, so the `MOONSHINE_MODELS_DIR`, `ZIPFORMER_RU_DIR`, `PUNCT_MODEL`/`PUNCT_VOCAB` and `PARAKEET_LANGS` settings (and `PARAKEET_LANGS=off` as a rollback) no longer exist; roll back by running the previous image tag. Requests with a language Parakeet does not cover now get HTTP 400 instead of English text. `diarize=true` gets HTTP 400; the `utterances` and `language_confidence` fields of verbose_json, the `punctuate` option and the WebSocket `punctuate`/`smart_format` parameters are removed. verbose_json has no `language` when the request sent none. /health no longer has a `punctuation` field and answers 503 while Parakeet cannot serve. The service exits at startup when Parakeet cannot be loaded. The PARAKEET_POOL_SIZE default is 1 (it was POOL_SIZE, default 2).
+
+### Added
+
+* drop the native endpoints, refuse unknown response formats and non-16k streams ([53d9d00](https://github.com/anatolykoptev/ox-whisper/commit/53d9d00064985293af5154a008edb8767d8c16a5))
+* serve every request with Parakeet and refuse languages it cannot decode ([c1921fe](https://github.com/anatolykoptev/ox-whisper/commit/c1921fe8d46697284e3ec91c61f78d9914fdc521))
+
+
+### Fixed
+
+* skip smart_format without a language, pick one model precision, upgrade notes ([39faf9e](https://github.com/anatolykoptev/ox-whisper/commit/39faf9e477de0bd1a61f172e8f792bb16a909735))
+* **stt:** close the WS cleanly, skip failed interim decodes, keep the ffmpeg probe ([171bdae](https://github.com/anatolykoptev/ox-whisper/commit/171bdaefd9cf6086d21912953a96c71e70c9b151))
+* **stt:** stop leaking upload temp files, bound the WS buffer, keep Parakeet resident ([341a139](https://github.com/anatolykoptev/ox-whisper/commit/341a13996cc47f5752927a07a858f2d699948193))
+
 ## [0.8.3](https://github.com/anatolykoptev/ox-whisper/compare/v0.8.2...v0.8.3) (2026-10-02)
 
 

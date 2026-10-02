@@ -101,11 +101,14 @@ impl Models {
 /// encoder into memory.
 fn load_parakeet(config: &Config) -> Option<Arc<EvictablePool<TransducerRecognizer>>> {
     let dir = &config.parakeet_dir;
-    let encoder = find_model_file(dir, "encoder");
-    if !Path::new(&encoder).exists() {
-        tracing::error!("Parakeet encoder not found at {encoder}");
-        return None;
-    }
+    let files = match pick_model_files(dir) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!("{e}");
+            return None;
+        }
+    };
+    let encoder = files.encoder.clone();
     let cwd = std::env::current_dir().unwrap_or_default();
     let unresolved = unresolved_external_data(Path::new(&encoder), &cwd);
     if !unresolved.is_empty() {
@@ -117,18 +120,18 @@ fn load_parakeet(config: &Config) -> Option<Arc<EvictablePool<TransducerRecogniz
         );
         return None;
     }
-    if encoder.ends_with(".int8.onnx") {
+    if files.int8 {
         tracing::warn!(
-            "Parakeet encoder {encoder} is the int8 export, about 4 WER points worse than \
-             fp32 on the same clips"
+            "Parakeet: using the int8 set ({encoder}), about 4 WER points worse than fp32 on \
+             the same clips"
         );
     } else {
-        tracing::info!("Parakeet encoder {encoder}");
+        tracing::info!("Parakeet: using the full-precision set ({encoder})");
     }
     let cfg = TransducerConfig {
         encoder,
-        decoder: find_model_file(dir, "decoder"),
-        joiner: find_model_file(dir, "joiner"),
+        decoder: files.decoder,
+        joiner: files.joiner,
         tokens: format!("{dir}/tokens.txt"),
         num_threads: config.num_threads,
         sample_rate: 16000,
@@ -228,19 +231,55 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Finds a decoder/joiner/encoder file: the `.onnx` (fp32/fp16) export, then
-/// the `.int8.onnx` one. The int8 export failed the accuracy gate, so it is
-/// used only when nothing better is there — never because it sorts first.
-fn find_model_file(dir: &str, name: &str) -> String {
-    let full = format!("{}/{}.onnx", dir, name);
-    if Path::new(&full).exists() {
-        return full;
+/// The encoder, decoder and joiner of one export, all of one precision.
+#[derive(Debug, PartialEq, Eq)]
+struct ModelFiles {
+    encoder: String,
+    decoder: String,
+    joiner: String,
+    int8: bool,
+}
+
+/// Chooses the model set in `dir`: the full-precision (`*.onnx`, fp32/fp16)
+/// set when its encoder, decoder and joiner all exist, otherwise the
+/// `*.int8.onnx` set, which failed the accuracy gate and is never picked
+/// because it sorts first. Mixing precisions (an fp32 encoder with an int8
+/// decoder) is not a configuration anyone measured, so a half-present set is
+/// an error that names what is missing.
+fn pick_model_files(dir: &str) -> Result<ModelFiles, String> {
+    let set = |suffix: &str| {
+        let f = |name: &str| format!("{dir}/{name}{suffix}");
+        (f("encoder"), f("decoder"), f("joiner"))
+    };
+    let complete = |(e, d, j): &(String, String, String)| {
+        [e, d, j].iter().all(|p| Path::new(p.as_str()).exists())
+    };
+    let full = set(".onnx");
+    if complete(&full) {
+        return Ok(ModelFiles {
+            encoder: full.0,
+            decoder: full.1,
+            joiner: full.2,
+            int8: false,
+        });
     }
-    let int8 = format!("{}/{}.int8.onnx", dir, name);
-    if Path::new(&int8).exists() {
-        return int8;
+    let int8 = set(".int8.onnx");
+    if complete(&int8) {
+        return Ok(ModelFiles {
+            encoder: int8.0,
+            decoder: int8.1,
+            joiner: int8.2,
+            int8: true,
+        });
     }
-    full
+    let missing: Vec<&str> = [&full.0, &full.1, &full.2]
+        .into_iter()
+        .filter(|p| !Path::new(p.as_str()).exists())
+        .map(|p| p.as_str())
+        .collect();
+    Err(format!(
+        "no complete Parakeet model set in {dir}: missing {missing:?} (and no complete *.int8.onnx set)"
+    ))
 }
 
 pub(crate) fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {
@@ -302,24 +341,60 @@ mod tests {
         assert!(err.contains(&missing), "{err}");
     }
 
+    /// One precision for the whole set, chosen by completeness, never by
+    /// which file happens to sort first.
     #[test]
-    fn the_full_precision_export_wins_over_int8() {
+    fn one_precision_is_chosen_for_the_whole_set() {
         let dir = scratch("pick-model");
         let d = dir.to_string_lossy().into_owned();
-        // Only int8 present: used, but only because nothing better exists.
-        std::fs::write(dir.join("encoder.int8.onnx"), b"x").unwrap();
-        assert_eq!(
-            find_model_file(&d, "encoder"),
-            format!("{d}/encoder.int8.onnx")
+        let touch = |names: &[&str]| {
+            for n in names {
+                std::fs::write(dir.join(n), b"x").unwrap();
+            }
+        };
+        let rm = |names: &[&str]| {
+            for n in names {
+                std::fs::remove_file(dir.join(n)).unwrap();
+            }
+        };
+        let full = ["encoder.onnx", "decoder.onnx", "joiner.onnx"];
+        let int8 = ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx"];
+
+        // Nothing: an error naming the full-precision files.
+        let err = pick_model_files(&d).unwrap_err();
+        assert!(err.contains("encoder.onnx"), "{err}");
+
+        // Only int8: used, as a complete set.
+        touch(&int8);
+        let got = pick_model_files(&d).unwrap();
+        assert!(
+            got.int8 && got.decoder.ends_with("decoder.int8.onnx"),
+            "{got:?}"
         );
-        // Both present: the full-precision file, whatever the sort order.
-        std::fs::write(dir.join("encoder.onnx"), b"x").unwrap();
-        assert_eq!(find_model_file(&d, "encoder"), format!("{d}/encoder.onnx"));
-        // Neither: the full-precision path, so the error names the right file.
-        assert_eq!(find_model_file(&d, "decoder"), format!("{d}/decoder.onnx"));
-        for f in ["encoder.onnx", "encoder.int8.onnx"] {
-            std::fs::remove_file(dir.join(f)).unwrap();
-        }
+
+        // Both complete: full precision, whatever the sort order.
+        touch(&full);
+        let got = pick_model_files(&d).unwrap();
+        assert!(!got.int8 && got.joiner.ends_with("/joiner.onnx"), "{got:?}");
+
+        // A full-precision encoder alone does not drag an int8 decoder along:
+        // the full set is incomplete, so the whole int8 set is used.
+        rm(&["decoder.onnx", "joiner.onnx"]);
+        let got = pick_model_files(&d).unwrap();
+        assert!(
+            got.int8 && got.encoder.ends_with("encoder.int8.onnx"),
+            "{got:?}"
+        );
+
+        // Neither set complete (fp32 encoder, int8 decoder/joiner): an error.
+        rm(&["encoder.int8.onnx"]);
+        let err = pick_model_files(&d).unwrap_err();
+        assert!(
+            err.contains("decoder.onnx") && err.contains("joiner.onnx"),
+            "{err}"
+        );
+
+        rm(&["encoder.onnx", "decoder.int8.onnx", "joiner.int8.onnx"]);
         std::fs::remove_dir(&dir).unwrap();
     }
 

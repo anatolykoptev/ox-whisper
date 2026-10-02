@@ -268,3 +268,31 @@ async fn the_known_response_formats_are_not_refused() {
         assert_ne!(status, StatusCode::BAD_REQUEST, "{ok:?}");
     }
 }
+
+// --- smart_format ---
+
+/// `smart_format` rules are per language. With no language hint none apply:
+/// English rules over Russian audio would be a guess dressed as a feature.
+#[tokio::test]
+async fn smart_format_applies_only_with_a_language_hint() {
+    let dir = scratch_dir("api-smart");
+    let upload =
+        crate::upload::parse_openai_upload(&mut multipart(&[("smart_format", "true")]).await, &dir)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+
+    let run = |lang: Option<&str>| {
+        let mut r = result("twenty three dogs");
+        crate::handler_openai::apply_post_processing(&upload, &mut r, lang);
+        r.text
+    };
+    assert_eq!(
+        run(Some("en")),
+        "23 dogs",
+        "control: with a hint it applies"
+    );
+    assert_eq!(run(None), "twenty three dogs", "no hint, no rules");
+
+    drop(upload);
+    std::fs::remove_dir(&dir).unwrap();
+}

@@ -83,7 +83,7 @@ pub async fn transcriptions(
     response
 }
 
-fn apply_post_processing(
+pub(crate) fn apply_post_processing(
     upload: &upload::OpenAIUpload,
     r: &mut transcribe::TranscribeResult,
     language: Option<&str>,
@@ -92,8 +92,12 @@ fn apply_post_processing(
         r.text = crate::spelling::apply_spelling(&r.text, &upload.custom_spelling);
         crate::spelling::apply_spelling_to_words(&mut r.words, &upload.custom_spelling);
     }
-    if upload.smart_format {
-        r.text = crate::smart_format::smart_format(&r.text, language.unwrap_or("en"));
+    // The rules are per language. With no hint there is no language to apply
+    // them for, and guessing "en" would run English rules over Russian audio.
+    if upload.smart_format
+        && let Some(lang) = language
+    {
+        r.text = crate::smart_format::smart_format(&r.text, lang);
     }
     if upload.paragraphs {
         r.text = crate::paragraphs::split_paragraphs(

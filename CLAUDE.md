@@ -16,7 +16,7 @@
 | `src/pool.rs` | Recognizer pool: bounded-wait `acquire`, opt-in idle eviction, `is_healthy` |
 | `src/vad.rs` | Shared Silero VAD (reset per request, poison recovery) |
 | `src/tmpfile.rs` | `TempFile`: owns an upload / ffmpeg temp file, removes it on drop |
-| `src/chunking.rs` | Text helpers (`sanitize_utf8`, `split_text`); the audio split `split_audio_chunks` is in `transcribe.rs` |
+| `src/chunking.rs` | Text helpers (`sanitize_utf8`); the audio split `split_audio_chunks` is in `transcribe.rs` |
 | `src/audio.rs` | Audio format conversion (ffmpeg) |
 | `src/smart_format/` · `pii.rs` · `paragraphs.rs` · `spelling.rs` | Post-processing options (pure text transforms) |
 | `vendor/sherpa-rs/` | Vendored sherpa-onnx Rust bindings |

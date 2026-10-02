@@ -42,7 +42,6 @@ COPY vendor/ vendor/
 
 # Cook deps (cached layer)
 COPY --from=planner /app/recipe.json recipe.json
-COPY Cargo.toml Cargo.lock ./
 ENV SHERPA_LIB_PATH=/app/vendor/sherpa-onnx
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \

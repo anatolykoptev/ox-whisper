@@ -151,6 +151,19 @@ failed reload.
 
 ---
 
+## Upgrading to 0.9.0
+
+0.9.0 serves everything with Parakeet and removes the rest. What an upgrader has to do:
+
+1. **Re-run `scripts/download-models.sh`** (or `install.sh`). It now fetches only Parakeet and the VAD; the `en`, `ru` and `punct-en` model directories are no longer read and can be deleted after you have confirmed the new version. Parakeet fp32 needs about 3.2 GB of RAM per slot (`PARAKEET_POOL_SIZE`, default 1; was `POOL_SIZE`, default 2).
+2. **The container refuses to start without the Parakeet model**, and with `working_dir` unset for an fp32 export. There is no fallback model, so check `docker logs` after the first start. Rollback is the previous image tag, not `PARAKEET_LANGS=off`.
+3. **Remove the settings that no longer exist** (startup warns about each one still set): `PARAKEET_LANGS`, `ZIPFORMER_RU_DIR`, `MOONSHINE_MODELS_DIR`, `PUNCT_MODEL`, `PUNCT_VOCAB`, `DIARIZE_*`, `POOL_SIZE`, `OX_WHISPER_IDLE_EVICT_SECS`, `TTS_ENABLED`, and the matching volume mounts. `MOONSHINE_PORT` and `MOONSHINE_THREADS` keep their names.
+4. **Routes and fields removed:** `/transcribe`, `/transcribe/upload` and `/transcribe/stream` (404); the `diarize` option (`diarize=true` is a 400); the `punctuate` option and the WebSocket `punctuate` / `smart_format` parameters; `verbose_json` fields `language_confidence` and `utterances`; the `chunks` field and `max_chunk_len`; `punctuation` and `tts` in `/health`.
+5. **Behaviour changes:** a language Parakeet does not cover, an unknown `response_format`, and a WebSocket `sample_rate` other than 16000 are now HTTP 400. With no `language`, `verbose_json` has no `language` key and `smart_format` is skipped (its rules are per language). `/health` answers 503 while Parakeet cannot serve.
+6. **Metrics:** removed series `oxwhisper_recognizer_pool_size{lang="ru"|"en"}` (the pool is `lang="parakeet"`), `oxwhisper_vad_no_speech_total{caller="sse"}`, `oxwhisper_route_fallback_total` and the `oxwhisper_tts_*` family. New: `oxwhisper_ws_buffer_limit_total`, `caller="ws_poll"`, and `lang="auto"` on `oxwhisper_transcribe_duration_seconds` (and the VAD/chunk series) for requests with no language. Update alert rules and dashboards that select the old labels.
+
+---
+
 ## Benchmarks
 
 **Accuracy, 2026-10.** 100 Russian and 100 English FLEURS test utterances (public set, 4–23 s

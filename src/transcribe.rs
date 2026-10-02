@@ -12,7 +12,7 @@ use crate::chunking::{sanitize_utf8, split_text};
 use crate::config::Config;
 use crate::models::Models;
 use crate::punctuate::add_punctuation;
-use crate::vad::apply_vad;
+use crate::vad::{apply_vad, lock_vad};
 use crate::words::{
     WordTimestamp, compute_chunk_offsets, estimate_words_from_text, extract_words_with_confidence,
 };
@@ -110,15 +110,14 @@ fn do_transcribe(
     let max_chunk_samples = config.max_chunk_s * 16000;
     let (audio_chunks, speech_ms) = if use_vad {
         if let Some(ref vad_mutex) = models.vad {
-            let mut vad = vad_mutex
-                .lock()
-                .map_err(|_| TranscribeError::NoRecognizer)?;
+            let mut vad = lock_vad(vad_mutex);
             let vad_result = apply_vad(
                 &mut vad,
                 &samples,
                 16000,
                 config.vad_speech_pad_s,
                 config.vad_max_chunk_s,
+                "batch",
             );
             let total_ms = duration * 1000.0;
             let pct = if total_ms > 0.0 {
@@ -127,10 +126,11 @@ fn do_transcribe(
                 0.0
             };
             tracing::info!(
-                "VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} chunk(s)",
+                "VAD: {:.0}ms speech / {:.0}ms total ({:.0}%), {} segment(s), {} chunk(s)",
                 vad_result.speech_ms,
                 total_ms,
                 pct,
+                vad_result.segments,
                 vad_result.chunks.len()
             );
             let ratio = vad_result.speech_ms / total_ms.max(1.0);
@@ -156,16 +156,10 @@ fn do_transcribe(
     let joined = texts.join(" ");
     let text = sanitize_utf8(joined.trim());
 
-    // Skip external punctuation for:
-    // - EN: Moonshine v2 produces punctuated text natively (tokens include , . etc)
-    // - RU with GigaAM v3 transducer: has built-in punctuation
-    let skip_punct = language != "ru"
-        || models
-            .ru
-            .as_ref()
-            .and_then(|p| p.acquire().ok())
-            .map(|r| r.has_builtin_punct())
-            .unwrap_or(false);
+    // Skip external punctuation for EN: Moonshine v2 produces punctuated text
+    // natively (tokens include , . etc). A RU model with built-in punctuation
+    // is handled inside maybe_punctuate, for every path.
+    let skip_punct = language != "ru";
     let text = if skip_punct {
         text
     } else {
@@ -308,8 +302,9 @@ fn transcribe_ru(
         }
     }
     let _busy = RuBusyGuard;
-    let chunk_refs: Vec<&[f32]> = chunks.iter().map(|c| c.as_slice()).collect();
-    let results = rec.transcribe_batch(16000, &chunk_refs);
+    let results = decode_in_batches(chunks, DECODE_BATCH_CHUNKS, |batch| {
+        rec.transcribe_batch(16000, batch)
+    });
 
     let mut texts = Vec::new();
     let mut words = Vec::new();
@@ -345,11 +340,12 @@ pub(crate) fn maybe_punctuate(
     language: &str,
     punctuate_override: Option<bool>,
 ) -> String {
-    let should = match punctuate_override {
-        Some(v) => v,
-        None => (language == "en" || language == "ru") && models.punct.is_some(),
-    };
-    if should {
+    if wants_external_punct(
+        language,
+        punctuate_override,
+        models.punct.is_some(),
+        models.ru_builtin_punct,
+    ) {
         if let Some(ref m) = models.punct {
             if let Ok(p) = m.lock() {
                 return add_punctuation(&p, text);
@@ -357,6 +353,44 @@ pub(crate) fn maybe_punctuate(
         }
     }
     text.to_string()
+}
+
+/// Whether text goes through the external (English CNN-BiLSTM) punctuation
+/// model. Never for RU output that is already punctuated — not even when the
+/// client asked for punctuation, since it would only rewrite it.
+fn wants_external_punct(
+    language: &str,
+    punctuate_override: Option<bool>,
+    punct_loaded: bool,
+    ru_builtin_punct: bool,
+) -> bool {
+    if language == "ru" && ru_builtin_punct {
+        return false;
+    }
+    match punctuate_override {
+        Some(v) => v,
+        None => (language == "en" || language == "ru") && punct_loaded,
+    }
+}
+
+/// Chunks decoded together in one `transcribe_batch` call. Batch decoding
+/// pads every chunk to the longest and keeps all activations alive at once,
+/// so one call over a whole file grows memory with the file's length; with
+/// `VAD_MAX_CHUNK_S=20` this bounds a call to about 80 s of audio.
+pub(crate) const DECODE_BATCH_CHUNKS: usize = 4;
+
+/// Runs `decode` over `chunks` in groups of at most `batch`, preserving order.
+pub(crate) fn decode_in_batches<R>(
+    chunks: &[Vec<f32>],
+    batch: usize,
+    mut decode: impl FnMut(&[&[f32]]) -> Vec<R>,
+) -> Vec<R> {
+    let mut out = Vec::with_capacity(chunks.len());
+    for group in chunks.chunks(batch.max(1)) {
+        let refs: Vec<&[f32]> = group.iter().map(|c| c.as_slice()).collect();
+        out.extend(decode(&refs));
+    }
+    out
 }
 
 pub(crate) fn split_audio_chunks(samples: Vec<f32>, max_chunk_samples: usize) -> Vec<Vec<f32>> {
@@ -377,4 +411,36 @@ pub(crate) fn compression_ratio(text: &str) -> f64 {
     enc.write_all(text.as_bytes()).ok();
     let compressed = enc.finish().unwrap_or_default();
     text.len() as f64 / compressed.len().max(1) as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A long file is decoded in bounded groups, in order — never in one call.
+    #[test]
+    fn long_files_are_decoded_in_bounded_batches() {
+        let chunks: Vec<Vec<f32>> = (0..10).map(|i| vec![i as f32; 4]).collect();
+        let mut sizes = Vec::new();
+        let out = decode_in_batches(&chunks, DECODE_BATCH_CHUNKS, |batch| {
+            sizes.push(batch.len());
+            batch.iter().map(|c| c[0] as usize).collect()
+        });
+        assert_eq!(out, (0..10).collect::<Vec<_>>());
+        assert!(sizes.iter().all(|&n| n <= DECODE_BATCH_CHUNKS), "{sizes:?}");
+        assert_eq!(sizes.len(), 10usize.div_ceil(DECODE_BATCH_CHUNKS));
+    }
+
+    #[test]
+    fn already_punctuated_ru_output_skips_the_punctuation_model() {
+        // RU model with built-in punctuation: never, even when asked.
+        assert!(!wants_external_punct("ru", None, true, true));
+        assert!(!wants_external_punct("ru", Some(true), true, true));
+        // RU model without it: yes when the model is loaded or when asked.
+        assert!(wants_external_punct("ru", None, true, false));
+        assert!(wants_external_punct("ru", Some(true), false, false));
+        // EN is unaffected by the RU flag.
+        assert!(wants_external_punct("en", None, true, true));
+        assert!(!wants_external_punct("en", Some(false), true, true));
+    }
 }

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::models::Models;
-use crate::vad::apply_vad;
+use crate::vad::{apply_vad, lock_vad};
 use crate::words::WordTimestamp;
 use crate::ws_types::{Alternative, Channel, ServerMessage};
 
@@ -75,10 +75,7 @@ impl WsSession {
             Some(ref v) => v,
             None => return (messages, false),
         };
-        let mut vad = match vad_mutex.lock() {
-            Ok(v) => v,
-            Err(_) => return (messages, false),
-        };
+        let mut vad = lock_vad(vad_mutex);
 
         let result = apply_vad(
             &mut vad,
@@ -86,6 +83,7 @@ impl WsSession {
             self.sample_rate,
             config.vad_speech_pad_s,
             config.vad_max_chunk_s,
+            "ws",
         );
 
         let has_speech = !result.chunks.is_empty() && result.speech_ms > 0.0;

@@ -22,6 +22,9 @@ pub struct Config {
     pub max_audio_duration_s: f64,
     /// Number of recognizer instances per model (POOL_SIZE, default: 2)
     pub pool_size: usize,
+    /// How long a request waits for a busy recognizer before failing, seconds
+    /// (POOL_ACQUIRE_TIMEOUT_S, default: 30)
+    pub pool_acquire_timeout_s: u64,
     /// VAD speech probability threshold (VAD_THRESHOLD, default: 0.5)
     pub vad_threshold: f32,
     /// Minimum silence duration to split segments, seconds (VAD_MIN_SILENCE_S, default: 0.5)
@@ -177,6 +180,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(2),
+            pool_acquire_timeout_s: env_num("POOL_ACQUIRE_TIMEOUT_S", 0, 30),
             vad_threshold: env::var("VAD_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())

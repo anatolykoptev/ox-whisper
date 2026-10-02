@@ -41,7 +41,7 @@ impl RuRecognizer {
         match self {
             Self::NemoTransducer(_) => "gigaam-v3-rnnt-punct",
             Self::Transducer(_) => "zipformer-transducer",
-            Self::NemoCtc(_) => "gigaam-v2-ctc",
+            Self::NemoCtc(_) => "gigaam-ctc",
         }
     }
 }

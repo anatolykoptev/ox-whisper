@@ -186,6 +186,7 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 |----------|---------|
 | `MOONSHINE_MODELS_DIR` | `/models` |
 | `ZIPFORMER_RU_DIR` | `/ru-models` |
+| `POOL_ACQUIRE_TIMEOUT_S` | `30` — how long a request waits for a busy recognizer |
 | `SILERO_VAD_MODEL` | `/vad/silero_vad.onnx` |
 | `PUNCT_MODEL` | `/punct/model.int8.onnx` |
 | `PUNCT_VOCAB` | `/punct/bpe.vocab` |
@@ -236,6 +237,10 @@ scrape_configs:
 | `oxwhisper_audio_duration_seconds` | histogram | — |
 | `oxwhisper_vad_speech_ratio` | gauge | `lang` |
 | `oxwhisper_chunks_total` | counter | `lang` |
+| `oxwhisper_vad_no_speech_total` | counter | `caller` (`batch`, `sse`, `ws`; on `ws` it also counts checks before speech starts) |
+| `oxwhisper_vad_mutex_poisoned_total` | counter | — |
+| `oxwhisper_pool_acquire_wait_seconds` | histogram | — |
+| `oxwhisper_pool_acquire_timeouts_total` | counter | — |
 | `oxwhisper_hallucination_rejected_total` | counter | `lang` |
 | `oxwhisper_recognizer_pool_size` · `_busy` | gauge | `lang` |
 | `oxwhisper_ws_active_connections` | gauge | — |

@@ -15,6 +15,9 @@ pub struct DetectResult {
 
 /// Detect language by transcribing a short clip with each model.
 ///
+/// Runs on the request's async task, so it never waits for a busy slot
+/// (`try_acquire`): a busy model counts as producing no text.
+///
 /// Returns a `DetectResult` with the detected language ("en" or "ru") and
 /// a confidence score (winner_len / total_len). Falls back to "en" with
 /// confidence 0.0 if no models are loaded or both produce empty output.
@@ -57,7 +60,7 @@ fn try_transcribe_en(models: &Models, samples: &[f32]) -> usize {
         Some(p) => p,
         None => return 0,
     };
-    let mut rec = match pool.acquire() {
+    let mut rec = match pool.try_acquire() {
         Ok(r) => r,
         Err(_) => return 0,
     };
@@ -70,7 +73,7 @@ fn try_transcribe_ru(models: &Models, samples: &[f32]) -> usize {
         Some(p) => p,
         None => return 0,
     };
-    let mut rec = match pool.acquire() {
+    let mut rec = match pool.try_acquire() {
         Ok(r) => r,
         Err(_) => return 0,
     };

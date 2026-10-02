@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/anatolykoptev/ox-whisper/compare/v0.9.0...v0.9.1) (2026-10-02)
+
+
+### Added
+
+* **transcribe:** decode contiguous audio cut at quiet points, not the VAD path ([#67](https://github.com/anatolykoptev/ox-whisper/issues/67)) ([1d3bdaf](https://github.com/anatolykoptev/ox-whisper/commit/1d3bdaf90efca63a8a4dbfc87ac9491b880ea35f))
+
 ## [0.9.0](https://github.com/anatolykoptev/ox-whisper/compare/v0.8.3...v0.9.0) (2026-10-02)
 
 

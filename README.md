@@ -166,11 +166,11 @@ failed reload.
 
 ## Upgrading from 0.9.0
 
-Batch uploads and the WebSocket final decode no longer run the VAD. They decode the contiguous original audio in windows of at most `MAX_CHUNK_S` (default 30 s, was 20), each cut at the centre of the quietest 150 ms stretch in its last fifth. Nothing is dropped and nothing is padded, which removes the late onsets on quiet clips and the zero padding the VAD path added.
+Batch uploads and the WebSocket decodes (final and interim) no longer run the VAD. They decode the contiguous original audio in windows of at most `MAX_CHUNK_S` (default 30 s, was 20), each cut in the middle of the quietest 150 ms stretch in its last fifth. Nothing is dropped and nothing is padded, which removes the late onsets on quiet clips and the zero padding the VAD path added.
 
 1. **Remove `VAD_MIN_DURATION_S`** (startup warns while it is set): there is no length above which VAD switches on.
 2. **`MAX_CHUNK_S` is now 30 by default** (was 20) and `0` is refused. `VAD_SPEECH_PAD_S`, `VAD_MAX_CHUNK_S` and the other `VAD_*` settings still apply to WebSocket speech detection only.
-3. **Metrics:** `oxwhisper_vad_speech_ratio` is no longer set by batch requests; `oxwhisper_chunks_total` counts every chunk.
+3. **Metrics:** `oxwhisper_vad_speech_ratio` is removed and `oxwhisper_vad_no_speech_total{caller="batch"}` no longer increments (only `ws_poll` runs the VAD). New `oxwhisper_empty_transcript_total` counts batch requests whose text came back empty; `oxwhisper_chunks_total` counts every chunk. Update alert rules that select the old series.
 
 ---
 
@@ -263,9 +263,9 @@ scrape_configs:
 | `oxwhisper_request_duration_seconds` | histogram | `endpoint` |
 | `oxwhisper_transcribe_duration_seconds` | histogram | `lang` |
 | `oxwhisper_audio_duration_seconds` | histogram | — |
-| `oxwhisper_vad_speech_ratio` | gauge | `lang` |
 | `oxwhisper_chunks_total` | counter | `lang` |
-| `oxwhisper_vad_no_speech_total` | counter | `caller` (`batch`; `ws_poll` is the per-frame WebSocket check, where silence is normal, so do not alert on it) |
+| `oxwhisper_vad_no_speech_total` | counter | `caller` (`ws_poll` only: the per-frame WebSocket check, where silence is normal, so do not alert on it) |
+| `oxwhisper_empty_transcript_total` | counter | — (batch requests that returned empty text; silence is legitimately empty, so alert on the ratio to `oxwhisper_requests_total`) |
 | `oxwhisper_vad_mutex_poisoned_total` | counter | — |
 | `oxwhisper_pool_acquire_wait_seconds` | histogram | — |
 | `oxwhisper_pool_acquire_timeouts_total` | counter | — |

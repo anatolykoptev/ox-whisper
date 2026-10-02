@@ -72,7 +72,7 @@ const REMOVED_SETTINGS: &[&str] = &[
     "POOL_SIZE",
     "OX_WHISPER_IDLE_EVICT_SECS",
     "TTS_ENABLED",
-    // Batch and WebSocket-final decodes no longer run VAD: they decode contiguous
+    // Batch and WebSocket decodes no longer run VAD: they decode contiguous
     // audio cut at quiet points, so there is no minimum duration to switch on.
     "VAD_MIN_DURATION_S",
 ];
@@ -117,6 +117,22 @@ where
         },
         None => default,
     }
+}
+
+/// Longest `MAX_CHUNK_S`. One `transcribe_batch` call decodes
+/// `DECODE_BATCH_CHUNKS` windows at once and Parakeet's full-attention encoder
+/// grows memory with the window, so the window is bounded: 4 x 60 s is already
+/// twice the audio per call that was measured.
+pub const MAX_CHUNK_CEILING_S: usize = 60;
+
+/// `MAX_CHUNK_S`: 1..=`max`; zero, unparsable or too large warns and uses `default`.
+fn env_window(get: &dyn Fn(&str) -> Option<String>, name: &str, default: usize, max: usize) -> usize {
+    let n = env_num(get, name, 1, default);
+    if n > max {
+        tracing::warn!("{name}={n} too large (want <= {max}); using default {default}");
+        return default;
+    }
+    n
 }
 
 impl Config {
@@ -164,7 +180,7 @@ impl Config {
             vad_speech_pad_s: parse_env(get, "VAD_SPEECH_PAD_S").unwrap_or(0.05),
             vad_min_speech_s: parse_env(get, "VAD_MIN_SPEECH_S").unwrap_or(0.25),
             vad_max_chunk_s: parse_env(get, "VAD_MAX_CHUNK_S").unwrap_or(20),
-            max_chunk_s: env_num(get, "MAX_CHUNK_S", 1, 30),
+            max_chunk_s: env_window(get, "MAX_CHUNK_S", 30, MAX_CHUNK_CEILING_S),
             hallucination_threshold: parse_env(get, "HALLUCINATION_THRESHOLD").unwrap_or(2.4),
             max_body_size_mb: parse_env(get, "MAX_BODY_SIZE_MB").unwrap_or(50),
             provider: get("ONNX_PROVIDER").unwrap_or_else(|| "cpu".to_string()),
@@ -253,6 +269,18 @@ mod tests {
         assert_eq!(cfg.max_chunk_samples(), 30 * 16000);
         let cfg = Config::from_lookup(&lookup(&[("MAX_CHUNK_S", "20")]));
         assert_eq!(cfg.max_chunk_samples(), 20 * 16000);
+    }
+
+    #[test]
+    fn the_decode_window_is_capped() {
+        let at = |v: &'static str| -> usize {
+            let l = move |k: &str| (k == "MAX_CHUNK_S").then(|| v.to_string());
+            Config::from_lookup(&l).max_chunk_s
+        };
+        assert_eq!(at("60"), 60);
+        assert_eq!(at("61"), 30);
+        assert_eq!(at("100000"), 30);
+        assert_eq!(at("abc"), 30);
     }
 
     #[test]

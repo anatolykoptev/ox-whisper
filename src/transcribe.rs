@@ -125,20 +125,33 @@ fn do_transcribe(
         config.hallucination_threshold,
     )?;
 
+    Ok(assemble_result(texts, words, duration))
+}
+
+/// Joins the decoded chunks into the response. Counts an empty transcript: the
+/// VAD's `no_speech` counter used to flag these for batch requests, and an
+/// empty 200 is the silent failure behind the earlier VAD bug.
+fn assemble_result(
+    texts: Vec<String>,
+    words: Vec<WordTimestamp>,
+    duration: f64,
+) -> TranscribeResult {
     // Parakeet writes case and punctuation itself.
     let joined = texts.join(" ");
     let text = sanitize_utf8(joined.trim());
-
-    Ok(TranscribeResult {
+    if text.is_empty() {
+        metrics::counter!(names::EMPTY_TRANSCRIPT).increment(1);
+    }
+    TranscribeResult {
         text,
         duration_ms: 0.0,
         audio_duration_ms: duration * 1000.0,
         words,
-    })
+    }
 }
 
 /// The chunks one decode is made of: the contiguous original audio, cut only at
-/// quiet points. Shared by the batch endpoint and the WebSocket final decode so
+/// quiet points. Shared by the batch endpoint and the WebSocket decodes (final and interim) so
 /// neither drops, trims or pads audio.
 pub(crate) fn plan_chunks(samples: Vec<f32>, config: &Config) -> Vec<Vec<f32>> {
     split_at_quiet(samples, config.max_chunk_samples())
@@ -273,6 +286,36 @@ mod plan_tests {
         assert_eq!(back.len(), x.len(), "samples dropped or inserted");
         assert!(back.iter().zip(&x).all(|(a, b)| a.to_bits() == b.to_bits()));
         assert_eq!(back[..16000 * 3], x[..16000 * 3]);
+    }
+
+    /// Not a hard splitter: the first cut lands in the middle of the quiet
+    /// stretch in the window's last fifth, not at the 30 s mark.
+    #[test]
+    fn the_first_cut_lands_on_the_quiet_stretch_not_the_window_end() {
+        let config = Config::from_lookup(&|_| None);
+        let win = config.max_chunk_samples();
+        let mut x: Vec<f32> = (0..win + 16000 * 40)
+            .map(|i| 0.3 * ((i as f32) * 0.21).sin())
+            .collect();
+        let quiet = (win * 9 / 10 / 160) * 160;
+        x[quiet..quiet + 2400].fill(0.0001); // 150 ms
+        let chunks = plan_chunks(x.clone(), &config);
+        assert_eq!(chunks[0].len(), quiet + 7 * 160);
+        assert_ne!(chunks[0].len(), win);
+        let back: Vec<f32> = chunks.iter().flatten().copied().collect();
+        assert_eq!(back, x);
+    }
+
+    #[test]
+    fn an_empty_transcript_is_counted_and_a_text_one_is_not() {
+        let rec = crate::metrics::test_recorder::CountingRecorder::default();
+        metrics::with_local_recorder(&rec, || {
+            assemble_result(vec![], vec![], 1.0);
+            assemble_result(vec!["  ".into()], vec![], 1.0);
+            let r = assemble_result(vec!["hello".into(), "world".into()], vec![], 1.0);
+            assert_eq!(r.text, "hello world");
+        });
+        assert_eq!(rec.count("oxwhisper_empty_transcript_total", &[]), 2);
     }
 
     #[test]

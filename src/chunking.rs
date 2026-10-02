@@ -18,13 +18,13 @@ pub fn sanitize_utf8(text: &str) -> String {
 const SR: usize = 16_000;
 /// Energy is measured per 10 ms hop.
 const HOP: usize = SR / 100;
-/// A cut point is the centre of the quietest stretch of this many hops (150 ms).
+/// A cut point is the middle of the quietest stretch of this many hops (150 ms).
 /// A stretch, not a single frame: the closure of a stop consonant is quiet for a
 /// frame or two and would cut a word in half.
 const SPAN: usize = 15;
 
 /// Chunk boundaries as sample offsets, starting with `0` and ending with
-/// `x.len()`: windows of at most `max_len` samples, each cut at the centre of
+/// `x.len()`: windows of at most `max_len` samples, each cut in the middle of
 /// the quietest 150 ms stretch in its last fifth.
 ///
 /// Port of `chunk_bounds` in ox-say's `ox-stt.cpp`. Consecutive boundaries are
@@ -58,6 +58,8 @@ pub fn chunk_bounds(x: &[f32], max_len: usize) -> Vec<usize> {
             }
             best = lo + (best_k + SPAN / 2) * HOP;
         }
+        // `best` is the start of the middle hop of the stretch (half a hop before
+        // its exact centre), as in ox-say.
         // A window shorter than one hop has no room to search: still advance.
         b.push(best.clamp(start + 1, hi));
     }

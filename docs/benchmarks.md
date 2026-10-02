@@ -43,7 +43,7 @@ The peak RSS of the two old-model rows is the process high-water mark under the 
 - **The int8 export is about 4 points worse than fp32.** The same int8 file shows the same errors in upstream sherpa-onnx 1.13.8, so the export is at fault. fp32 is within 0.25 points of the whisper.cpp q8_0 reference.
 - **fp16 saves nothing on this CPU.** onnxruntime upcasts it, so it needs the same RAM, has a higher peak, and runs about 50% slower.
 - **A reload after idle eviction raised Parakeet RSS from 3.2 to 5.5 GB.** Run it with `PARAKEET_IDLE_EVICT_SECS=0`.
-- **The VAD path cost 2–4 points against VAD off** (#53). Batch uploads and the WebSocket final decode now decode the contiguous audio in windows of at most `MAX_CHUNK_S` (30 s), each cut at the quietest 150 ms stretch of its last fifth: FLEURS RU 5.52%, EN 5.74%, no empty output, RTF about 0.20. A -62 dBFS clip that lost its first 14 s to the VAD (47 extra edits) is transcribed from its first word. 60 s of digital silence, of -58 dBFS white noise, of -38 dBFS white noise and of 50 Hz hum with hiss all return empty text, so no speech filter is needed.
+- **The VAD path cost 2–4 points against VAD off** (#53). Batch uploads and the WebSocket decodes (final and interim) now decode the contiguous audio in windows of at most `MAX_CHUNK_S` (30 s), each cut at the quietest 150 ms stretch of its last fifth: FLEURS RU 5.52%, EN 5.74%, no empty output, RTF about 0.20. A -62 dBFS clip that lost its first 14 s to the VAD (47 extra edits) is transcribed from its first word. 60 s of digital silence, of -58 dBFS white noise, of -38 dBFS white noise and of 50 Hz hum with hiss all return empty text, so no speech filter is needed.
 
 ## v0.3.0 (2026-03)
 

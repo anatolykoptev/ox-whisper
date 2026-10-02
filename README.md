@@ -6,7 +6,7 @@
 [![Platform](https://img.shields.io/badge/platform-linux%2Faarch64-blue)](#limitations)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://ghcr.io/anatolykoptev/ox-whisper)
 
-**Self-hosted, OpenAI-compatible speech-to-text (STT) HTTP server in Rust.** Drop-in replacement for the OpenAI Whisper API — runs on a single ARM64 CPU, no GPU. 29 languages: NVIDIA Parakeet TDT 0.6B v3 for 25 European languages (Russian and English included, with case and punctuation), Moonshine v2 for Arabic, Chinese, Japanese and Vietnamese. Real-time WebSocket streaming. Word-level timestamps. Built on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
+**Self-hosted, OpenAI-compatible speech-to-text (STT) HTTP server in Rust.** Drop-in replacement for the OpenAI Whisper API — runs on a single ARM64 CPU, no GPU. 25 European languages, Russian and English included, with case and punctuation, via NVIDIA Parakeet TDT 0.6B v3. Real-time WebSocket streaming. Word-level timestamps. Built on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
 
 Built for voice AI agents, live captioning, edge deployments, and privacy-sensitive transcription on Oracle Free Tier / Hetzner CAX / Raspberry Pi 5.
 
@@ -22,7 +22,7 @@ Built for voice AI agents, live captioning, edge deployments, and privacy-sensit
 | **Protocol** | HTTP + WebSocket | library | library / examples | HTTPS |
 | **OpenAI-compatible API** | yes | no | partial | n/a |
 | **Real-time WebSocket** | yes | no | no | no |
-| **CPU RTF (aarch64, 4 threads)** | ~0.18 Parakeet · ~0.03 Moonshine | ~0.075 (tiny) | ~0.13 (tiny) | n/a |
+| **CPU RTF (aarch64, 4 threads)** | ~0.15–0.27 Parakeet · ~0.03 Moonshine | ~0.075 (tiny) | ~0.13 (tiny) | n/a |
 | **GPU required** | no | optional | optional | n/a |
 
 ox-whisper wins on a narrow but real wedge: **a polished HTTP/WebSocket server with an OpenAI-compatible API, faster than real time on a CPU, no GPU, ARM64-native.** Pair it with Pipecat / LiveKit / Vapi for self-hosted voice agents.
@@ -35,7 +35,7 @@ ox-whisper wins on a narrow but real wedge: **a polished HTTP/WebSocket server w
 curl -fsSL https://raw.githubusercontent.com/anatolykoptev/ox-whisper/master/install.sh | bash
 ```
 
-Linux aarch64. Docker auto-installed if missing. Pulls `ghcr.io/anatolykoptev/ox-whisper:latest`, fetches ~3 GB of models (Parakeet is 2.5 GB of it; `OX_WHISPER_PARAKEET=0` skips it, leaving ~463 MB), starts on `:8092` (HTTP/WS) + `:9092` (metrics). With Parakeet the container needs ~3.5 GB of RAM; the bundled compose file allows 6 GB.
+Linux aarch64. Docker auto-installed if missing. Pulls `ghcr.io/anatolykoptev/ox-whisper:latest`, fetches ~3 GB of models (Parakeet is 2.5 GB of it; `OX_WHISPER_PARAKEET=0` skips it, leaving ~463 MB), starts on `:8092` (HTTP/WS) + `:9092` (metrics). With Parakeet the container holds ~3.2 GB and peaks at ~4.3 GB on long audio; the bundled compose file allows 7 GB.
 
 ```bash
 curl http://localhost:8092/health
@@ -48,7 +48,7 @@ curl http://localhost:8092/v1/models
 ```bash
 docker run -d --name ox-whisper --restart unless-stopped \
   -p 127.0.0.1:8092:8092 -p 127.0.0.1:9092:9092 \
-  --memory 6g -w /parakeet-models \
+  --memory 7g -w /parakeet-models \
   -e PARAKEET_POOL_SIZE=1 -e PARAKEET_IDLE_EVICT_SECS=0 \
   -v $(pwd)/models/parakeet:/parakeet-models:ro \
   -v $(pwd)/models/en:/models:ro \
@@ -63,7 +63,7 @@ services:
   ox-whisper:
     image: ghcr.io/anatolykoptev/ox-whisper:latest
     restart: unless-stopped
-    mem_limit: 6g
+    mem_limit: 7g
     working_dir: /parakeet-models   # the fp32 encoder loads encoder.weights from here
     ports:
       - "127.0.0.1:8092:8092"
@@ -149,9 +149,14 @@ curl -N -F file=@long.mp3 -F language=en http://localhost:8092/transcribe/stream
 | Codes | Model |
 |-------|-------|
 | `bg cs da de el en es et fi fr hr hu it lt lv mt nl pl pt ro ru sk sl sv uk` | Parakeet TDT 0.6B v3, when `PARAKEET_DIR` holds the model |
-| `ar ja vi zh` | Moonshine v2 Base |
 | `ru` without Parakeet (absent, or `ru` left out of `PARAKEET_LANGS`) | GigaAM / Zipformer-RU from `ZIPFORMER_RU_DIR` |
-| `en es uk` without Parakeet | Moonshine v2 Base |
+| every other code, and `en` without Parakeet | the one Moonshine model in `MOONSHINE_MODELS_DIR` |
+
+`download-models.sh` fetches the **English** Moonshine model, so with the stock models only
+English is transcribed correctly on that route: `ar ja vi zh` and other codes are decoded by the
+English model and come back as English-sounding text, not an error
+([#58](https://github.com/anatolykoptev/ox-whisper/issues/58)). Moonshine publishes separate
+models per language; ox-whisper loads only one.
 
 Parakeet is language-agnostic: a request sent with `language=ru` that carries English speech
 is transcribed as English. It writes case and punctuation itself, so its output skips the
@@ -190,8 +195,8 @@ With VAD off, Parakeet scores 5.5% RU and 5.7% EN on the same clips; the VAD pat
 rest ([#53](https://github.com/anatolykoptev/ox-whisper/issues/53)). On a 5-minute English file Moonshine returns almost nothing (95% WER); Parakeet
 gets 38%. Details: [docs/benchmarks.md](docs/benchmarks.md).
 
-**Speed.** Oracle Cloud A1 free tier, 4 ARM threads, CPU-only. Parakeet fp32 runs at RTF
-~0.2 (a 15 s voice note in ~3.5 s). Moonshine and Zipformer, best of 3 runs after warmup:
+**Speed.** Oracle Cloud A1 free tier, 4 ARM threads, CPU-only. Parakeet fp32 measured RTF
+0.14–0.27 depending on load on this shared box (a 15 s note took 3.7 s end to end). Moonshine and Zipformer, best of 3 runs after warmup:
 
 | Audio length | Language | Latency | RTF |
 |---|---|---|---|
@@ -295,9 +300,9 @@ scrape_configs:
 - **aarch64 only.** Pre-built `.so` libs are ARM64; x86_64 needs source rebuild of `vendor/sherpa-rs-sys`.
 - **No streaming for `/transcribe`.** Whole-file responses only. Use `/transcribe/stream` (SSE) or `/v1/listen` (WebSocket) for incremental output.
 - **No auth.** Bind to `0.0.0.0`; put behind nginx / Caddy if exposed to the network.
-- **29 languages.** For broader coverage, use `whisper-large-v3` via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) or [speaches](https://github.com/speaches-ai/speaches).
-- **Punctuation.** Parakeet writes case and punctuation for its 25 languages. Without Parakeet, English is punctuated by the CNN-BiLSTM model and Russian only by GigaAM v3; Moonshine's other languages get none.
-- **Memory.** Parakeet needs ~3.5 GB of RAM. On a small box (Raspberry Pi 5, 4 GB) skip it with `OX_WHISPER_PARAKEET=0`.
+- **25 languages** (Parakeet), plus English on the Moonshine fallback. For broader coverage, use `whisper-large-v3` via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) or [speaches](https://github.com/speaches-ai/speaches).
+- **Punctuation.** Parakeet writes case and punctuation for its 25 languages. Without Parakeet, the CNN-BiLSTM model punctuates Russian (Zipformer, GigaAM v2) and English output; GigaAM v3 punctuates itself.
+- **Memory.** Parakeet holds ~3.2 GB and peaks at ~4.3 GB on 5-minute audio. On a small box (Raspberry Pi 5, 4 GB) skip it with `OX_WHISPER_PARAKEET=0`.
 
 ---
 

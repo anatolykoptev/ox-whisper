@@ -16,7 +16,7 @@
 | `src/pool.rs` | Recognizer pools: bounded-wait `acquire`, idle eviction |
 | `src/vad.rs` | Shared Silero VAD (reset per request, poison recovery) |
 | `src/detect.rs` | Language auto-detection |
-| `src/chunking.rs` | Fixed-length split of long audio when VAD is off |
+| `src/chunking.rs` | Text helpers (`sanitize_utf8`, `split_text`); the audio split `split_audio_chunks` is in `transcribe.rs` |
 | `src/audio.rs` | Audio format conversion (ffmpeg) |
 | `src/punctuate.rs` | Punctuation restoration |
 | `src/smart_format/` · `pii.rs` · `paragraphs.rs` · `spelling.rs` · `diarize.rs` | Post-processing options |
@@ -32,19 +32,18 @@
 ## Models
 
 Parakeet TDT 0.6B v3 (fp32) serves 25 European languages, `ru` and `en` included, with its
-own case and punctuation; Moonshine v2 serves `ar ja vi zh` (and `en es uk` without Parakeet);
-Zipformer/GigaAM serve `ru` only when Parakeet does not. Models load at startup from mounted
-volumes. Benchmarks: README and `docs/benchmarks.md`.
+own case and punctuation; Zipformer/GigaAM serve `ru` only when Parakeet does not; everything
+else goes to the single Moonshine model, which the stock download makes English-only (#58).
+Models load at startup from mounted volumes. Benchmarks: README and `docs/benchmarks.md`.
 
 ## Deploy
 
-Build the image and recreate the container, e.g.:
+Releases publish `ghcr.io/anatolykoptev/ox-whisper:<version>`; the bundled compose runs that
+image (`OX_WHISPER_VERSION`). To run a local build instead, tag it and point the compose
+`image:` at the tag (or use a compose with a `build:` section), then
+`docker compose up -d --no-deps ox-whisper`.
 
-```bash
-docker build -t ox-whisper . && docker compose up -d --no-deps ox-whisper
-```
-
-With Parakeet the container needs `working_dir` = the Parakeet directory, about 6 GB of
+With Parakeet the container needs `working_dir` = the Parakeet directory, about 7 GB of
 `mem_limit`, `PARAKEET_POOL_SIZE=1` and `PARAKEET_IDLE_EVICT_SECS=0` (see README, Languages).
 `PARAKEET_LANGS=off` rolls back to the old models without a rebuild.
 

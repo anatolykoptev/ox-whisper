@@ -15,7 +15,7 @@ Server: ARM64 (Oracle Cloud A1.Flex), 4 vCPU, 24 GB RAM, CPU-only, a shared box 
 |---|---|---|---|---|---|
 | Zipformer-RU + Moonshine v2, before #54 | 17.39% (25.42%) | 29.88% (32.77%) | 14 | 0.03 | 0.8 / 1.1 GB |
 | Zipformer-RU + Moonshine v2, after #54 | 13.89% (22.25%) | 15.47% (19.73%) | 0 | 0.03 | 0.8 / 1.1 GB |
-| **Parakeet fp32, `ru`** | **7.65% (9.46%)** | **9.73% (11.92%)** | **0** | 0.18–0.27 | 2.8 / 3.5 GB |
+| **Parakeet fp32, `ru`** | **7.65% (9.46%)** | **9.73% (11.92%)** | **0** | 0.14–0.27 ¹ | 3.2 / 3.5 GB |
 | Parakeet fp32, VAD off | 5.52% (7.16%) | 5.74% (7.42%) | 0 | — | — |
 | Parakeet int8, VAD off | 9.68% (11.15%) | 9.73% (11.78%) | 0 | 0.07 | 2.5 GB at pool 2 |
 | Parakeet fp16 (third-party export) | 7.65% | 9.93% | 2 | 0.21 | 3.1 / 4.1 GB |
@@ -25,8 +25,11 @@ Server: ARM64 (Oracle Cloud A1.Flex), 4 vCPU, 24 GB RAM, CPU-only, a shared box 
 
 | Configuration | RU WER | EN WER | Peak RSS |
 |---|---|---|---|
-| Zipformer-RU + Moonshine v2 | 19.3% | 97.3% | ~1.6 GB |
+| Zipformer-RU + Moonshine v2, before #54 | 19.3% | 97.3% | ~1.6 GB |
+| Zipformer-RU + Moonshine v2, after #54 | 14.1% | 94.9% | 2.1 GB |
 | Parakeet fp32 | 18.2% | 37.6% | 4.3 GB |
+
+¹ Measured on this build under varying load on a shared host: 0.14 in the #52 run, 0.18 (EN) and 0.27 (RU) in the post-deploy probe. Upstream sherpa-onnx (pip) ran the same model at 0.17–0.18 on an idle host.
 
 **Findings.**
 - **The empty results came from the shared Silero VAD.** It carried state from one request to the next, and its 0.5 s `max_speech_duration` shredded speech into short segments. Both are fixed in #54. The Moonshine-only empties on 15–17 s single chunks, noted in the v0.3.0 section below, are a separate limit.

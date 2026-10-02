@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     # Parakeet fp32 holds ~3.2 GB per pool slot and peaks ~4.3 GB on 5-minute
     # audio; without Parakeet (OX_WHISPER_PARAKEET=0 at download) 2500m covers it.
-    mem_limit: ${OX_WHISPER_MEM_LIMIT:-6g}
+    mem_limit: ${OX_WHISPER_MEM_LIMIT:-7g}
     # Needed only for a Parakeet export with external weights (fp32/fp16:
     # encoder.weights), which onnxruntime resolves from the working directory.
     # Harmless without Parakeet: nothing else reads relative paths.

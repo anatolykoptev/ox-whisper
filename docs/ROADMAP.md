@@ -44,7 +44,7 @@ DX-улучшения от конкурентов + исправление ба�
 - [x] `custom_spelling` — пользовательские замены слов с поддержкой пунктуации (7 тестов)
 - [x] Word timestamps fallback — proportional estimation для Moonshine v2 (нет нативных timestamps)
 - [x] GitHub Actions release workflow — Docker buildx на нативном aarch64 runner, auto-changelog, GitHub Release
-- [ ] GigaAM v3 RNNT — код готов, модель в Docker не подключена; для `ru` теперь Parakeet (v0.6.0), GigaAM остаётся запасным вариантом без Parakeet
+- [ ] GigaAM v3 RNNT — код готов, модель в Docker не подключена; для `ru` теперь Parakeet (см. раздел v0.6.0 ниже), GigaAM остаётся запасным вариантом без Parakeet
 - [x] Бенчмарки WER — FLEURS ru/en, 100+100 клипов (2026-10, `docs/benchmarks.md`); Golos/CommonVoice — нет
 - [ ] Diarization models в Docker — segmentation.onnx / embedding.onnx не подключены
 

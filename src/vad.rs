@@ -20,6 +20,12 @@ pub fn apply_vad(
     max_chunk_s: usize,
 ) -> VadResult {
     let pad_samples = (pad_s * sample_rate as f32) as usize;
+    // One detector is shared by every request. Start from a clean state:
+    // `clear()` below only drops finished segments, so without a reset the
+    // previous request's model state and buffer decide how this audio is
+    // segmented — identical input then yields different chunks, sometimes
+    // none at all (an empty transcript with HTTP 200).
+    vad.reset();
     // Feed 512-sample windows
     let mut offset = 0;
     while offset + WINDOW_SIZE <= samples.len() {
@@ -96,4 +102,73 @@ pub fn apply_vad(
     vad.clear();
 
     VadResult { chunks, speech_ms }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/vad")
+            .join(name)
+    }
+
+    fn samples(name: &str) -> Vec<f32> {
+        crate::audio::load_wav(&fixture(name))
+            .expect("fixture wav")
+            .0
+    }
+
+    /// The production VAD (same loader and settings as `Models::load`) applied
+    /// with the production pad and chunk length.
+    fn vad_run(vad: &mut SileroVad, samples: &[f32]) -> VadResult {
+        let config = crate::config::Config::from_env();
+        apply_vad(
+            vad,
+            samples,
+            16000,
+            config.vad_speech_pad_s,
+            config.vad_max_chunk_s,
+        )
+    }
+
+    fn production_vad() -> SileroVad {
+        let mut config = crate::config::Config::from_env();
+        config.vad_model = fixture("silero_vad.onnx").to_string_lossy().into_owned();
+        // Sample-buffer capacity only; the default allocates an hour of audio.
+        config.max_audio_duration_s = 60.0;
+        crate::models::load_vad(&config)
+            .expect("VAD fixture loads")
+            .into_inner()
+            .expect("fresh mutex")
+    }
+
+    /// The detector is shared by all requests. Segmenting a clip must not
+    /// depend on what the previous request fed it. Fixture pair from the
+    /// 2026-10-01 eval: after clip `a`, the un-reset detector returned zero
+    /// segments for clip `b` (an empty transcript with HTTP 200).
+    #[test]
+    fn segmentation_does_not_depend_on_the_previous_request() {
+        let a = samples("fleurs_en_a.wav");
+        let b = samples("fleurs_en_b.wav");
+
+        let fresh = vad_run(&mut production_vad(), &b);
+        assert!(!fresh.chunks.is_empty(), "clip b is speech");
+
+        let mut shared = production_vad();
+        let _ = vad_run(&mut shared, &a);
+        let after_a = vad_run(&mut shared, &b);
+        assert_eq!(after_a.chunks.len(), fresh.chunks.len());
+        assert_eq!(after_a.speech_ms, fresh.speech_ms);
+        assert!(
+            after_a.chunks == fresh.chunks,
+            "chunks differ after a prior request"
+        );
+
+        // And the same clip twice in a row gives the same segmentation.
+        let again = vad_run(&mut shared, &b);
+        assert!(again.chunks == fresh.chunks);
+    }
 }

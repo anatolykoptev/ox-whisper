@@ -139,6 +139,15 @@ impl SileroVad {
             sherpa_rs_sys::SherpaOnnxVoiceActivityDetectorClear(self.vad);
         }
     }
+
+    /// Resets the detector to its freshly created state: the Silero model's
+    /// recurrent and trigger state, the sample buffer and the pending segment
+    /// start. `clear()` only drops the queue of finished segments.
+    pub fn reset(&mut self) {
+        unsafe {
+            sherpa_rs_sys::SherpaOnnxVoiceActivityDetectorReset(self.vad);
+        }
+    }
 }
 
 unsafe impl Send for SileroVad {}

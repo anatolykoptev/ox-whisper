@@ -319,7 +319,7 @@ fn find_model_file(dir: &str, name: &str) -> String {
     format!("{}/{}.onnx", dir, name)
 }
 
-fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {
+pub(crate) fn load_vad(config: &Config) -> Option<Mutex<SileroVad>> {
     if !Path::new(&config.vad_model).exists() {
         tracing::warn!("VAD model not found at {}, skipping", config.vad_model);
         return None;

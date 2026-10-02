@@ -164,10 +164,20 @@ failed reload.
 
 ---
 
+## Upgrading from 0.9.0
+
+Batch uploads and the WebSocket decodes (final and interim) no longer run the VAD. They decode the contiguous original audio in windows of at most `MAX_CHUNK_S` (default 30 s, was 20), each cut in the middle of the quietest 150 ms stretch in its last fifth. Nothing is dropped and nothing is padded, which removes the late onsets on quiet clips and the zero padding the VAD path added.
+
+1. **Remove `VAD_MIN_DURATION_S`** (startup warns while it is set): there is no length above which VAD switches on.
+2. **`MAX_CHUNK_S` is now 30 by default** (was 20) and `0` is refused. `VAD_SPEECH_PAD_S`, `VAD_MAX_CHUNK_S` and the other `VAD_*` settings still apply to WebSocket speech detection only.
+3. **Metrics:** `oxwhisper_vad_speech_ratio` is removed and `oxwhisper_vad_no_speech_total{caller="batch"}` no longer increments (only `ws_poll` runs the VAD). New `oxwhisper_empty_transcript_total` counts batch requests whose text came back empty; `oxwhisper_chunks_total` counts every chunk. Update alert rules that select the old series.
+
+---
+
 ## Benchmarks
 
 **Accuracy, 2026-10.** 100 Russian and 100 English FLEURS test utterances (public set, 4–23 s
-each), sent through `/v1/audio/transcriptions` with VAD on as in production. The older rows
+each), sent through `/v1/audio/transcriptions`. The older rows
 send each clip with its own `language`; the Parakeet row sends both sets with `language=ru`, as
 a client that always says `ru` would. WER normalised (lowercase, punctuation stripped, `ё`→`е`); "case kept" keeps
 capitalisation.
@@ -176,11 +186,11 @@ capitalisation.
 |---|---|---|---|
 | *Removed:* Zipformer-RU + Moonshine v2 (before the VAD fixes) | 17.4% (25.4%) | 29.9% (32.8%) | 14 of 200 EN |
 | *Removed:* Zipformer-RU + Moonshine v2, VAD fixed ([#54](https://github.com/anatolykoptev/ox-whisper/pull/54)) | 13.9% (22.3%) | 15.5% (19.7%) | 0 |
-| **Parakeet TDT 0.6B v3 fp32** | **7.7% (9.5%)** | **9.7% (11.9%)** | **0** |
+| Parakeet TDT 0.6B v3 fp32, 0.9.0 (VAD path) | 7.7% (9.5%) | 9.7% (11.9%) | 0 |
+| **Parakeet TDT 0.6B v3 fp32, contiguous audio** | **5.5% (7.2%)** | **5.7% (7.4%)** | **0** |
 
-With VAD off, Parakeet scores 5.5% RU and 5.7% EN on the same clips; the VAD path costs the
-rest ([#53](https://github.com/anatolykoptev/ox-whisper/issues/53)). On a 5-minute English file the old Moonshine model returned almost nothing (95% WER); Parakeet
-gets 38%. Details: [docs/benchmarks.md](docs/benchmarks.md).
+The 0.9.0 VAD path cost the difference ([#53](https://github.com/anatolykoptev/ox-whisper/issues/53)); decoding contiguous audio removes it. On a 5-minute English file the old Moonshine model returned almost nothing (95% WER); Parakeet
+gets 13%. Details: [docs/benchmarks.md](docs/benchmarks.md).
 
 **Speed.** Oracle Cloud A1 free tier, 4 ARM threads, CPU-only. Parakeet fp32 measured RTF
 0.14–0.27 depending on load on this shared box (a 15 s note took 3.7 s end to end).
@@ -199,7 +209,7 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | `MOONSHINE_THREADS` | `4` | ONNX inference threads (ditto) |
 | `MAX_AUDIO_DURATION_S` | `0` | Max input length, `0`=unlimited |
 | `WS_MAX_BUFFER_S` | `120` | Longest audio a WebSocket session may buffer; past it the client gets an `Error` frame and the connection closes (also capped by `MAX_AUDIO_DURATION_S` when set) |
-| `VAD_MIN_DURATION_S` | `10` | Auto-enable VAD above this length |
+| `MAX_CHUNK_S` | `30` | Decode window: audio longer than this is cut at the quietest point of each window's last fifth; anything up to it decodes in one piece |
 | `OXWHISPER_PROM_PORT` | `9092` | Prometheus metrics port |
 
 <details>
@@ -212,12 +222,11 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | `PARAKEET_POOL_SIZE` | `1` — each slot holds ~3.2 GB |
 | `PARAKEET_IDLE_EVICT_SECS` | `0` — keep Parakeet resident (recommended); it does not inherit `OX_WHISPER_IDLE_EVICT_SECS` |
 | `SILERO_VAD_MODEL` | `/vad/silero_vad.onnx` |
-| `VAD_THRESHOLD` | `0.5` |
+| `VAD_THRESHOLD` | `0.5` — the `VAD_*` settings below only drive WebSocket speech detection (`SpeechStarted`); decoding no longer uses VAD |
 | `VAD_MIN_SILENCE_S` | `0.5` |
 | `VAD_SPEECH_PAD_S` | `0.05` |
 | `VAD_MIN_SPEECH_S` | `0.25` |
 | `VAD_MAX_CHUNK_S` | `20` |
-| `MAX_CHUNK_S` | `20` |
 | `HALLUCINATION_THRESHOLD` | `2.4` |
 | `MAX_BODY_SIZE_MB` | `50` |
 | `ONNX_PROVIDER` | `cpu` |
@@ -254,9 +263,9 @@ scrape_configs:
 | `oxwhisper_request_duration_seconds` | histogram | `endpoint` |
 | `oxwhisper_transcribe_duration_seconds` | histogram | `lang` |
 | `oxwhisper_audio_duration_seconds` | histogram | — |
-| `oxwhisper_vad_speech_ratio` | gauge | `lang` |
 | `oxwhisper_chunks_total` | counter | `lang` |
-| `oxwhisper_vad_no_speech_total` | counter | `caller` (`batch`; `ws_poll` is the per-frame WebSocket check, where silence is normal, so do not alert on it) |
+| `oxwhisper_vad_no_speech_total` | counter | `caller` (`ws_poll` only: the per-frame WebSocket check, where silence is normal, so do not alert on it) |
+| `oxwhisper_empty_transcript_total` | counter | — (batch requests that returned empty text; silence is legitimately empty, so alert on the ratio to `oxwhisper_requests_total`) |
 | `oxwhisper_vad_mutex_poisoned_total` | counter | — |
 | `oxwhisper_pool_acquire_wait_seconds` | histogram | — |
 | `oxwhisper_pool_acquire_timeouts_total` | counter | — |

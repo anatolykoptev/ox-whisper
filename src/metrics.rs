@@ -8,12 +8,14 @@ pub mod names {
     pub const REQUEST_DURATION: &str = "oxwhisper_request_duration_seconds";
     pub const TRANSCRIBE_DURATION: &str = "oxwhisper_transcribe_duration_seconds";
     pub const AUDIO_DURATION: &str = "oxwhisper_audio_duration_seconds";
-    pub const VAD_SPEECH_RATIO: &str = "oxwhisper_vad_speech_ratio";
     pub const CHUNKS_TOTAL: &str = "oxwhisper_chunks_total";
-    /// VAD passes that found no speech at all (→ empty transcript), by caller:
-    /// `batch` and `ws_poll` — the WebSocket check that runs on every
-    /// frame, where silence is normal, so alert on `batch` only.
+    /// VAD passes that found no speech at all, by caller. Only `ws_poll` runs
+    /// the VAD now — the WebSocket check that runs on every frame, where
+    /// silence is normal, so do not alert on it.
     pub const VAD_NO_SPEECH: &str = "oxwhisper_vad_no_speech_total";
+    /// Batch transcriptions that returned empty text (silence is legitimately
+    /// empty, so alert on the ratio to requests, not the count).
+    pub const EMPTY_TRANSCRIPT: &str = "oxwhisper_empty_transcript_total";
     /// Recoveries from a VAD mutex poisoned by a panic.
     pub const VAD_MUTEX_POISONED: &str = "oxwhisper_vad_mutex_poisoned_total";
     pub const HALLUCINATION_REJECTED: &str = "oxwhisper_hallucination_rejected_total";

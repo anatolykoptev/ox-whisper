@@ -59,7 +59,6 @@ pub async fn transcriptions(
             &state_clone.config,
             job_file.path(),
             language.unwrap_or("auto"),
-            None,
         )
     })
     .await

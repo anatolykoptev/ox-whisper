@@ -19,14 +19,12 @@ pub struct Config {
     /// Number of threads for inference (MOONSHINE_THREADS, default: 4 — name
     /// kept for deployed compose files)
     pub num_threads: i32,
-    /// Minimum VAD segment duration in seconds (VAD_MIN_DURATION_S, default: 10.0)
-    pub vad_min_duration_s: f64,
     /// Maximum audio duration in seconds (MAX_AUDIO_DURATION_S, default: 0 = no limit)
     pub max_audio_duration_s: f64,
     /// How long a request waits for a busy recognizer before failing, seconds
     /// (POOL_ACQUIRE_TIMEOUT_S, default: 30)
     pub pool_acquire_timeout_s: u64,
-    /// VAD speech probability threshold (VAD_THRESHOLD, default: 0.5)
+    /// VAD speech probability threshold, WebSocket speech detection only (VAD_THRESHOLD, default: 0.5)
     pub vad_threshold: f32,
     /// Minimum silence duration to split segments, seconds (VAD_MIN_SILENCE_S, default: 0.5)
     pub vad_min_silence_s: f32,
@@ -36,7 +34,8 @@ pub struct Config {
     pub vad_min_speech_s: f32,
     /// Maximum chunk duration for VAD grouping, seconds (VAD_MAX_CHUNK_S, default: 20)
     pub vad_max_chunk_s: usize,
-    /// Maximum chunk duration for non-VAD splitting, seconds (MAX_CHUNK_S, default: 20)
+    /// Decode window, seconds (MAX_CHUNK_S, default: 30): audio longer than this is
+    /// cut at the quietest point of each window's last fifth.
     pub max_chunk_s: usize,
     /// Compression ratio threshold for hallucination guard (HALLUCINATION_THRESHOLD, default: 2.4)
     pub hallucination_threshold: f64,
@@ -73,6 +72,9 @@ const REMOVED_SETTINGS: &[&str] = &[
     "POOL_SIZE",
     "OX_WHISPER_IDLE_EVICT_SECS",
     "TTS_ENABLED",
+    // Batch and WebSocket decodes no longer run VAD: they decode contiguous
+    // audio cut at quiet points, so there is no minimum duration to switch on.
+    "VAD_MIN_DURATION_S",
 ];
 
 /// The [`REMOVED_SETTINGS`] that `get` finds set.
@@ -117,7 +119,33 @@ where
     }
 }
 
+/// Longest `MAX_CHUNK_S`. One `transcribe_batch` call decodes
+/// `DECODE_BATCH_CHUNKS` windows at once and Parakeet's full-attention encoder
+/// grows memory with the window, so the window is bounded: 4 x 60 s is already
+/// twice the audio per call that was measured.
+pub const MAX_CHUNK_CEILING_S: usize = 60;
+
+/// `MAX_CHUNK_S`: 1..=`max`; zero, unparsable or too large warns and uses `default`.
+fn env_window(
+    get: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    default: usize,
+    max: usize,
+) -> usize {
+    let n = env_num(get, name, 1, default);
+    if n > max {
+        tracing::warn!("{name}={n} too large (want <= {max}); using default {default}");
+        return default;
+    }
+    n
+}
+
 impl Config {
+    /// The decode window in 16 kHz samples: the longest chunk one decode call gets.
+    pub fn max_chunk_samples(&self) -> usize {
+        self.max_chunk_s * 16000
+    }
+
     /// The WebSocket buffer cap in samples at the 16 kHz the decoder assumes,
     /// tightened to `MAX_AUDIO_DURATION_S` when that is set: a stream may not
     /// buffer more than a batch upload may carry.
@@ -150,7 +178,6 @@ impl Config {
             vad_model: get("SILERO_VAD_MODEL")
                 .unwrap_or_else(|| "/vad/silero_vad.onnx".to_string()),
             num_threads: parse_env(get, "MOONSHINE_THREADS").unwrap_or(4),
-            vad_min_duration_s: parse_env(get, "VAD_MIN_DURATION_S").unwrap_or(10.0),
             max_audio_duration_s: parse_env(get, "MAX_AUDIO_DURATION_S").unwrap_or(0.0),
             pool_acquire_timeout_s: env_num(get, "POOL_ACQUIRE_TIMEOUT_S", 0, 30),
             vad_threshold: parse_env(get, "VAD_THRESHOLD").unwrap_or(0.5),
@@ -158,7 +185,7 @@ impl Config {
             vad_speech_pad_s: parse_env(get, "VAD_SPEECH_PAD_S").unwrap_or(0.05),
             vad_min_speech_s: parse_env(get, "VAD_MIN_SPEECH_S").unwrap_or(0.25),
             vad_max_chunk_s: parse_env(get, "VAD_MAX_CHUNK_S").unwrap_or(20),
-            max_chunk_s: parse_env(get, "MAX_CHUNK_S").unwrap_or(20),
+            max_chunk_s: env_window(get, "MAX_CHUNK_S", 30, MAX_CHUNK_CEILING_S),
             hallucination_threshold: parse_env(get, "HALLUCINATION_THRESHOLD").unwrap_or(2.4),
             max_body_size_mb: parse_env(get, "MAX_BODY_SIZE_MB").unwrap_or(50),
             provider: get("ONNX_PROVIDER").unwrap_or_else(|| "cpu".to_string()),
@@ -238,5 +265,34 @@ mod tests {
         // 0 would disable the cap: refused, the default applies.
         let cfg = Config::from_lookup(&lookup(&[("WS_MAX_BUFFER_S", "0")]));
         assert_eq!(cfg.ws_max_buffer_samples(), 120 * 16000);
+    }
+
+    #[test]
+    fn the_decode_window_defaults_to_30_s_and_refuses_zero() {
+        assert_eq!(Config::from_lookup(&lookup(&[])).max_chunk_s, 30);
+        let cfg = Config::from_lookup(&lookup(&[("MAX_CHUNK_S", "0")]));
+        assert_eq!(cfg.max_chunk_samples(), 30 * 16000);
+        let cfg = Config::from_lookup(&lookup(&[("MAX_CHUNK_S", "20")]));
+        assert_eq!(cfg.max_chunk_samples(), 20 * 16000);
+    }
+
+    #[test]
+    fn the_decode_window_is_capped() {
+        let at = |v: &'static str| -> usize {
+            let l = move |k: &str| (k == "MAX_CHUNK_S").then(|| v.to_string());
+            Config::from_lookup(&l).max_chunk_s
+        };
+        assert_eq!(at("60"), 60);
+        assert_eq!(at("61"), 30);
+        assert_eq!(at("100000"), 30);
+        assert_eq!(at("abc"), 30);
+    }
+
+    #[test]
+    fn the_retired_vad_duration_gate_is_reported() {
+        assert_eq!(
+            removed_settings_present(&lookup(&[("VAD_MIN_DURATION_S", "10")])),
+            vec!["VAD_MIN_DURATION_S"]
+        );
     }
 }

@@ -5,6 +5,10 @@
 # Usage:
 #   ./scripts/download-models.sh [models_dir]
 # Default models_dir: ./models
+#
+# Parakeet TDT 0.6B v3 (fp32, ~2.5 GB, ~3.2 GB RAM resident) serves ru, en and
+# 23 more European languages when present. OX_WHISPER_PARAKEET=0 skips it, for
+# small boxes: those languages then fall back to Zipformer (ru) and Moonshine.
 
 set -euo pipefail
 
@@ -63,6 +67,32 @@ fetch_archive \
   "https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-online-punct-en-2024-08-06.tar.bz2" \
   "$MODELS_DIR/punct-en" \
   "$MODELS_DIR/punct-en/model.int8.onnx"
+
+# --- Parakeet TDT 0.6B v3, fp32 (HuggingFace), sha256-pinned ---
+# fp32, not the int8 export: on 100+100 FLEURS ru/en clips the int8 export came
+# out ~4 WER points worse, while fp32 matched the reference within 0.25 points.
+fetch_sha() {
+  local url="$1" dest="$2" want="$3"
+  fetch "$url" "$dest"
+  local got
+  got=$(sha256sum "$dest" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$dest" | cut -d' ' -f1)
+  if [[ "$got" != "$want" ]]; then
+    rm -f "$dest"
+    printf 'checksum mismatch for %s: got %s, want %s\n' "$dest" "$got" "$want" >&2
+    exit 1
+  fi
+}
+if [[ "${OX_WHISPER_PARAKEET:-1}" != 0 ]]; then
+  mkdir -p "$MODELS_DIR/parakeet"
+  PK_BASE="https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/main"
+  fetch_sha "$PK_BASE/encoder.onnx"    "$MODELS_DIR/parakeet/encoder.onnx"    3eed7ce424bf8339ad09233533c687e2dbd07e74ccf5027b5e7344019ea373b0
+  fetch_sha "$PK_BASE/encoder.weights" "$MODELS_DIR/parakeet/encoder.weights" 3af3f51af5f2d01dbbf5af47d42c7962a2c205f11004254bb4f2b979862f39a8
+  fetch_sha "$PK_BASE/decoder.onnx"    "$MODELS_DIR/parakeet/decoder.onnx"    d593cdb0e571f5a457ec2219af9968cbf6b0e8198e8f7839b40a8754593bf68c
+  fetch_sha "$PK_BASE/joiner.onnx"     "$MODELS_DIR/parakeet/joiner.onnx"     b9b0bcf88ac571902e69a6536223ed2d94885e981b85045410f1403d53121a63
+  fetch_sha "$PK_BASE/tokens.txt"      "$MODELS_DIR/parakeet/tokens.txt"      d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d
+else
+  log "skip Parakeet (OX_WHISPER_PARAKEET=0)"
+fi
 
 log "All models downloaded to $MODELS_DIR"
 log "Sizes:"

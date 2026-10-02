@@ -6,9 +6,9 @@ services:
     image: ghcr.io/anatolykoptev/ox-whisper:${OX_WHISPER_VERSION:-latest}
     container_name: ox-whisper
     restart: unless-stopped
-    # Size this for the models you mount: without Parakeet 2.5g covers a
-    # 5-minute file; with Parakeet raise it (see README, "Parakeet").
-    mem_limit: ${OX_WHISPER_MEM_LIMIT:-2500m}
+    # Parakeet fp32 holds ~3.2 GB per pool slot and peaks ~4.3 GB on 5-minute
+    # audio; without Parakeet (OX_WHISPER_PARAKEET=0 at download) 2500m covers it.
+    mem_limit: ${OX_WHISPER_MEM_LIMIT:-6g}
     # Needed only for a Parakeet export with external weights (fp32/fp16:
     # encoder.weights), which onnxruntime resolves from the working directory.
     # Harmless without Parakeet: nothing else reads relative paths.
@@ -25,6 +25,8 @@ services:
       # Parakeet serves its 25 languages when ./models/parakeet holds the model;
       # add PARAKEET_LANGS=off to go back to the old models.
       PARAKEET_POOL_SIZE: "${OX_WHISPER_PARAKEET_POOL_SIZE:-1}"
+      # keep Parakeet resident: a reload after eviction more than doubles RSS (#55)
+      PARAKEET_IDLE_EVICT_SECS: "0"
     volumes:
       - ${OX_WHISPER_MODELS:-./models}/en:/models:ro
       - ${OX_WHISPER_MODELS:-./models}/ru:/ru-models:ro

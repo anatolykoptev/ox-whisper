@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.3](https://github.com/anatolykoptev/ox-whisper/compare/v0.8.2...v0.8.3) (2026-10-02)
+
+
+### Fixed
+
+* **ci:** publish versioned image tags on release ([#60](https://github.com/anatolykoptev/ox-whisper/issues/60)) ([73ae020](https://github.com/anatolykoptev/ox-whisper/commit/73ae0206db65074d7248a9d3dee605ce2dee8683))
+
+
+### Documentation
+
+* document Parakeet as the default and fetch it at install ([#57](https://github.com/anatolykoptev/ox-whisper/issues/57)) ([e49518e](https://github.com/anatolykoptev/ox-whisper/commit/e49518ec1d75cd5b089e4e4c8582f38934c33a28))
+
 ## [0.8.2](https://github.com/anatolykoptev/ox-whisper/compare/v0.8.1...v0.8.2) (2026-10-02)
 
 

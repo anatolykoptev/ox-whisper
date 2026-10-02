@@ -313,7 +313,7 @@ cargo build --release          # native aarch64
 docker build -t ox-whisper .   # BuildKit + cargo-chef layer cache
 ```
 
-CI publishes `ghcr.io/anatolykoptev/ox-whisper:vX.Y.Z` on every `v*` tag.
+Each release publishes `ghcr.io/anatolykoptev/ox-whisper:X.Y.Z`, `:X.Y` and `:latest`.
 
 ---
 

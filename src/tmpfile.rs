@@ -1,13 +1,17 @@
 //! Scratch files that clean up after themselves.
 //!
-//! Uploads and ffmpeg conversions live in a tmpfs that is charged to the
-//! container's memory limit, so a file nobody removes is a slow outage:
-//! `/health` stays green while every request fails once the tmpfs is full.
+//! Uploads and ffmpeg conversions live in `/tmp`, which the bundled compose
+//! file mounts as a size-bounded tmpfs charged to the container's memory
+//! limit, so a file nobody removes is a slow outage: `/health` stays green
+//! while every request fails once the tmpfs is full.
 //! [`TempFile`] makes the leak impossible at the source: whoever owns the
 //! value owns the file, and dropping it — normal return, early `?`, or an axum
 //! handler future cancelled by a client that went away — removes the file.
-//! (A panic aborts the process in release builds, `panic = "abort"`, so the
-//! tmpfs dies with the container; no unwinding is relied on.)
+//! (A panic aborts the process in release builds, `panic = "abort"`, and a
+//! deadline exit skips destructors, so some files can still be leaked then; the
+//! tmpfs is emptied when the container restarts. With a compose file that does
+//! not mount one, `/tmp` is the container's writable layer and the files stay
+//! until the container is recreated.)
 
 use std::io;
 use std::path::{Path, PathBuf};

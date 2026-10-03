@@ -54,10 +54,17 @@ pub async fn ws_listen(
         });
         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
     }
-    ws.on_upgrade(move |socket| handle_ws(socket, state, params))
+    // Counted before the upgrade completes, so shutdown never misses a session.
+    let session = state.shutdown.session();
+    ws.on_upgrade(move |socket| handle_ws(socket, state, params, session))
 }
 
-async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams) {
+async fn handle_ws(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    params: WsParams,
+    _session: crate::server::SessionGuard,
+) {
     let start = std::time::Instant::now();
     metrics::gauge!(crate::metrics::names::WS_ACTIVE).increment(1.0);
     let _conn = WsConnGuard { start };
@@ -126,7 +133,17 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
                     let (returned, (vad_msgs, speech_final)) = match checked {
                         Ok(done) => done,
                         Err(e) => {
+                            // The session state went down with the task: tell
+                            // the client, and close with 1011.
                             tracing::error!("WS VAD check failed: {e}");
+                            let _ = send_msg(
+                                &mut socket,
+                                &ServerMessage::Error {
+                                    message: "internal error".into(),
+                                },
+                            )
+                            .await;
+                            close_with(&mut socket, close_code::ERROR, "internal error").await;
                             break;
                         }
                     };

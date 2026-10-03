@@ -146,9 +146,23 @@ impl<T: Send + 'static> EvictablePool<T> {
         let deadline = start + self.acquire_timeout;
         let (lock, cvar) = &*self.released;
         loop {
-            let seen = *lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut seen = *lock.lock().unwrap_or_else(|p| p.into_inner());
             match self.try_acquire() {
                 Err(AcquireError::AllBusy) => {}
+                // One slot failed to reload but another is in use: it will be
+                // released (and `/health` says the pool can serve), so keep
+                // waiting for it rather than failing the request now.
+                Err(AcquireError::ReinitFailed(_)) if self.any_busy() => {
+                    // The failed attempt notified waiters, this thread
+                    // included: take the generation again so that wake-up
+                    // does not turn the wait into a retry loop. A release
+                    // landing before the re-read leaves a slot idle, which
+                    // the check below catches.
+                    seen = *lock.lock().unwrap_or_else(|p| p.into_inner());
+                    if self.has_idle_item() {
+                        continue;
+                    }
+                }
                 other => {
                     if other.is_ok() && start.elapsed() > Duration::from_millis(1) {
                         metrics::histogram!(crate::metrics::names::POOL_ACQUIRE_WAIT)
@@ -226,6 +240,7 @@ impl<T: Send + 'static> EvictablePool<T> {
                 };
 
                 slot.last_used.store(now, Ordering::Relaxed);
+                slot.reload_failed.store(false, Ordering::Release);
                 return Ok(EvictableGuard {
                     slot: Arc::clone(slot),
                     item: Some(new_item),
@@ -256,16 +271,13 @@ impl<T: Send + 'static> EvictablePool<T> {
 
     /// Rebuilds an evicted slot through the factory, outside the slot mutex.
     /// The caller has claimed the slot (`busy`) and holds no lock. Records the
-    /// outcome on the slot: `reload_failed` is set on failure and cleared on
-    /// success, so health follows the latest attempt for that slot.
+    /// failure on the slot (`reload_failed`); the caller clears it once the
+    /// rebuilt item is stored, so a slot never reads healthy while empty.
     fn reinit(&self, slot: &EvictableSlot<T>) -> Result<T, anyhow::Error> {
         metrics::counter!(crate::metrics::names::POOL_COLD_STARTS).increment(1);
         tracing::info!("pool cold start: reinitializing evicted slot");
         match (self.factory)() {
-            Ok(item) => {
-                slot.reload_failed.store(false, Ordering::Release);
-                Ok(item)
-            }
+            Ok(item) => Ok(item),
             Err(e) => {
                 tracing::error!("pool slot reinit failed: {e}");
                 metrics::counter!(crate::metrics::names::POOL_REINIT_FAILURES).increment(1);
@@ -305,6 +317,8 @@ impl<T: Send + 'static> EvictablePool<T> {
             };
             if let Ok(item) = rebuilt {
                 *guard = Some(item);
+                // Item first, flag second: healthy implies a loaded slot.
+                slot.reload_failed.store(false, Ordering::Release);
                 // Fresh stamp: the next idle tick must not evict it again.
                 slot.last_used.store(unix_now_secs(), Ordering::Relaxed);
                 recovered += 1;
@@ -382,6 +396,18 @@ impl<T: Send + 'static> EvictablePool<T> {
                 }
             }
         })
+    }
+
+    /// A loaded slot nobody is using.
+    fn has_idle_item(&self) -> bool {
+        self.slots.iter().any(|s| {
+            !s.busy.load(Ordering::Acquire)
+                && s.item.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+        })
+    }
+
+    fn any_busy(&self) -> bool {
+        self.slots.iter().any(|s| s.busy.load(Ordering::Acquire))
     }
 
     fn has_failed_slots(&self) -> bool {
@@ -732,6 +758,42 @@ mod tests {
             Some(5),
             "the rebuilt item is resident"
         );
+    }
+
+    /// A failed reload on one slot must not fail a request while another slot
+    /// is merely busy: the request waits for it.
+    #[test]
+    fn acquire_waits_for_a_busy_slot_when_another_slot_cannot_reload() {
+        use std::sync::atomic::AtomicUsize;
+        // First rebuild succeeds (slot 0, held below), every later one fails.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let pool = Arc::new(
+            EvictablePool::evicted(
+                2,
+                1,
+                Arc::new(move || {
+                    if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(1u32)
+                    } else {
+                        Err(anyhow::anyhow!("out of memory"))
+                    }
+                }),
+            )
+            .with_acquire_timeout(Duration::from_secs(5)),
+        );
+        let held = pool.try_acquire().expect("slot 0 loads");
+        let p = pool.clone();
+        let waiter = std::thread::spawn(move || p.acquire().map(|g| *g));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!waiter.is_finished(), "failed instead of waiting");
+        assert!(
+            calls.load(Ordering::SeqCst) <= 3,
+            "the waiter retried the reload in a loop: {} attempts",
+            calls.load(Ordering::SeqCst)
+        );
+        drop(held);
+        assert_eq!(waiter.join().unwrap().expect("served by slot 0"), 1);
     }
 
     // ── B2. factory_error_returns_err_and_slot_stays_alive ──────────────────

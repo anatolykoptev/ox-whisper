@@ -278,7 +278,11 @@ fn referenced_names(path: &Path, names: &[&str], block: usize) -> std::io::Resul
     let mut buf = vec![0u8; keep + block.max(1)];
     let mut carried = 0;
     loop {
-        let n = file.read(&mut buf[carried..])?;
+        let n = match file.read(&mut buf[carried..]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         if n == 0 {
             return Ok(found);
         }

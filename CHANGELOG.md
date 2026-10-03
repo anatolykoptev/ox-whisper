@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/anatolykoptev/ox-whisper/compare/v0.9.1...v0.9.2) (2026-10-03)
+
+
+### Fixed
+
+* end the /health 503 latch, bound shutdown, harden the encoder check ([#69](https://github.com/anatolykoptev/ox-whisper/issues/69)) ([7174107](https://github.com/anatolykoptev/ox-whisper/commit/7174107016a60a4982fc37261701eff44593f2b1))
+
 ## [0.9.1](https://github.com/anatolykoptev/ox-whisper/compare/v0.9.0...v0.9.1) (2026-10-02)
 
 

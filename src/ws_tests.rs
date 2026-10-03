@@ -208,8 +208,9 @@ async fn a_sample_rate_other_than_16k_is_refused_before_the_upgrade() {
 }
 
 /// The per-frame VAD pass covers the whole buffer: run on a tokio worker it
-/// stalls every other task for its duration. A heartbeat on the same
-/// single-threaded runtime must keep ticking while the pass runs.
+/// stalls every other task for as long as it takes (or waits for the shared
+/// detector). A heartbeat on the same single-threaded runtime must keep
+/// ticking while a pass waits on a detector that another thread holds.
 #[tokio::test(flavor = "current_thread")]
 async fn the_vad_pass_does_not_stall_the_runtime() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -230,7 +231,7 @@ async fn the_vad_pass_does_not_stall_the_runtime() {
     });
     let app = Router::new()
         .route("/v1/listen", get(super::ws_listen))
-        .with_state(state);
+        .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await });
@@ -249,9 +250,19 @@ async fn the_vad_pass_does_not_stall_the_runtime() {
     });
     tokio::task::yield_now().await;
 
+    // Another thread holds the detector for 400 ms: the pass has to wait.
+    let held = state.clone();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _detector = crate::vad::lock_vad(held.models.vad.as_ref().unwrap());
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+    });
+    locked_rx.recv().unwrap();
+
     // The frame is handled in order, so the answer to Finalize arrives only
-    // after the VAD pass over the 100 s of silence before it.
-    ws.send(pcm_seconds(100)).await.unwrap();
+    // after the VAD pass over the audio before it.
+    ws.send(pcm_seconds(2)).await.unwrap();
     ws.send(ClientMsg::Text(r#"{"type":"Finalize"}"#.into()))
         .await
         .unwrap();
@@ -259,7 +270,7 @@ async fn the_vad_pass_does_not_stall_the_runtime() {
     let _ = next_json(&mut ws).await;
     let during = ticks.load(Ordering::SeqCst) - before;
     assert!(
-        during >= 5,
+        during >= 50,
         "the runtime stalled during the VAD pass: {during} ticks"
     );
 }

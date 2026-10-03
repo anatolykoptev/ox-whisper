@@ -13,6 +13,8 @@ use crate::models::{Models, PARAKEET_MODEL_NAME};
 pub struct AppState {
     pub models: Models,
     pub config: Config,
+    /// Fires when the process is asked to stop; WebSocket sessions close on it.
+    pub shutdown: crate::server::ShutdownSignal,
 }
 
 #[derive(Serialize)]
@@ -21,6 +23,10 @@ pub struct HealthResponse {
     engine: &'static str,
     version: &'static str,
     vad: bool,
+    /// Which export is loaded: `full` (the `*.onnx` set) or `int8`, which
+    /// measured about 4 WER points worse. Absent when no model is loaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    precision: Option<&'static str>,
     languages: HashMap<&'static str, LanguageInfo>,
 }
 
@@ -60,6 +66,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Hea
             engine: "sherpa-onnx",
             version: env!("CARGO_PKG_VERSION"),
             vad: state.models.vad.is_some(),
+            precision: state.models.parakeet_precision,
             languages,
         }),
     )

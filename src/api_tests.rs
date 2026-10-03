@@ -23,6 +23,7 @@ fn state(dir: &std::path::Path) -> Arc<AppState> {
     Arc::new(AppState {
         models: Models::empty(),
         config,
+        shutdown: crate::server::ShutdownSignal::inert(),
     })
 }
 
@@ -195,6 +196,7 @@ async fn health_is_503_without_a_model_and_200_with_a_healthy_pool() {
     let (code, body) = handlers::health(State(Arc::new(AppState {
         models: Models::empty(),
         config: Config::from_lookup(&|_| None),
+        shutdown: crate::server::ShutdownSignal::inert(),
     })))
     .await;
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
@@ -216,12 +218,24 @@ async fn health_is_503_without_a_model_and_200_with_a_healthy_pool() {
     assert_eq!(body["languages"]["en"]["model"], "parakeet-tdt-0.6b-v3");
     assert!(body["languages"].get("zh").is_none());
 
-    // A reload that failed: not ready again, though the model is loaded.
-    st.models
-        .parakeet
-        .as_ref()
-        .unwrap()
-        .set_reinit_failing(true);
+    // Precision is reported once the model set is known.
+    let mut st = Arc::try_unwrap(st).ok().expect("sole owner");
+    st.models.parakeet_precision = Some("int8");
+    let st = Arc::new(st);
+    let (_, body) = handlers::health(State(st.clone())).await;
+    assert_eq!(json_of(body.into_response()).await["precision"], "int8");
+
+    // A pool whose only slot is evicted still reloads on demand: ready. Once
+    // that reload has failed, it is not ready, though the model is configured.
+    let evicted: EvictablePool<TransducerRecognizer> =
+        EvictablePool::evicted(1, 600, Arc::new(|| Err(anyhow::anyhow!("out of memory"))));
+    let pool = Arc::new(evicted);
+    let mut st = Arc::try_unwrap(st).ok().expect("sole owner");
+    st.models.parakeet = Some(pool.clone());
+    let st = Arc::new(st);
+    let (code, _) = handlers::health(State(st.clone())).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(pool.try_acquire().is_err());
     let (code, _) = handlers::health(State(st)).await;
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     std::fs::remove_dir(&dir).unwrap();

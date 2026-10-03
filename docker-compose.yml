@@ -23,6 +23,11 @@ services:
       PARAKEET_POOL_SIZE: "${OX_WHISPER_PARAKEET_POOL_SIZE:-1}"
       # keep Parakeet resident: a reload after eviction more than doubles RSS (#55)
       PARAKEET_IDLE_EVICT_SECS: "0"
+    # Uploads and ffmpeg conversions go to /tmp. As a tmpfs it is emptied on every
+    # container start (a file leaked by a killed process cannot survive a
+    # restart) and bounded; it counts against mem_limit.
+    tmpfs:
+      - /tmp:size=1g
     volumes:
       - ${OX_WHISPER_MODELS:-./models}/vad:/vad:ro
       - ${OX_WHISPER_MODELS:-./models}/parakeet:/parakeet-models:ro

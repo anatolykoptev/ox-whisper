@@ -35,6 +35,10 @@ struct EvictableSlot<T> {
     item: Mutex<Option<T>>,
     busy: std::sync::atomic::AtomicBool,
     last_used: AtomicU64,
+    /// The last attempt to rebuild this evicted slot failed. Per slot, not per
+    /// pool: one slot's success must not hide another's failure, and the
+    /// background retry needs to know which slots to try.
+    reload_failed: std::sync::atomic::AtomicBool,
 }
 
 /// Pool with opt-in idle eviction. Items are lazily re-created via `factory`
@@ -50,9 +54,6 @@ pub struct EvictablePool<T> {
     /// waiters. The counter closes the race between a failed try and the wait.
     released: Arc<(Mutex<u64>, Condvar)>,
     acquire_timeout: Duration,
-    /// The last slot reinit failed (and none has succeeded since): the pool
-    /// cannot serve an evicted slot, which `/health` must say.
-    reinit_failing: std::sync::atomic::AtomicBool,
 }
 
 impl<T: Send + 'static> EvictablePool<T> {
@@ -73,6 +74,7 @@ impl<T: Send + 'static> EvictablePool<T> {
                     item: Mutex::new(Some(item)),
                     busy: std::sync::atomic::AtomicBool::new(false),
                     last_used: AtomicU64::new(now),
+                    reload_failed: std::sync::atomic::AtomicBool::new(false),
                 })
             })
             .collect();
@@ -82,7 +84,6 @@ impl<T: Send + 'static> EvictablePool<T> {
             idle_secs,
             released: Arc::new((Mutex::new(0), Condvar::new())),
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
-            reinit_failing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -103,6 +104,7 @@ impl<T: Send + 'static> EvictablePool<T> {
                     item: Mutex::new(Some(item)),
                     busy: std::sync::atomic::AtomicBool::new(false),
                     last_used: AtomicU64::new(now),
+                    reload_failed: std::sync::atomic::AtomicBool::new(false),
                 })
             })
             .collect();
@@ -112,15 +114,20 @@ impl<T: Send + 'static> EvictablePool<T> {
             idle_secs,
             released: Arc::new((Mutex::new(0), Condvar::new())),
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
-            reinit_failing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    /// False while the most recent reinit of an evicted slot has failed: a
-    /// pool in that state answers requests with an error, however many slots
-    /// it nominally has. `/health` reports it.
+    /// False when every slot's last rebuild failed: no request can be served
+    /// until one succeeds, and `/health` reports it. Derived from slot state, so
+    /// it cannot outlive the failures it describes: a slot that is loaded, in
+    /// use, or merely evicted (it reloads on demand) counts as able to serve,
+    /// and the eviction loop retries the failed ones on its own.
     pub fn is_healthy(&self) -> bool {
-        !self.reinit_failing.load(Ordering::Acquire)
+        self.slots.is_empty()
+            || self
+                .slots
+                .iter()
+                .any(|s| !s.reload_failed.load(Ordering::Acquire))
     }
 
     /// Sets how long [`Self::acquire`] waits for a busy slot.
@@ -139,9 +146,23 @@ impl<T: Send + 'static> EvictablePool<T> {
         let deadline = start + self.acquire_timeout;
         let (lock, cvar) = &*self.released;
         loop {
-            let seen = *lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut seen = *lock.lock().unwrap_or_else(|p| p.into_inner());
             match self.try_acquire() {
                 Err(AcquireError::AllBusy) => {}
+                // One slot failed to reload but another is in use: it will be
+                // released (and `/health` says the pool can serve), so keep
+                // waiting for it rather than failing the request now.
+                Err(AcquireError::ReinitFailed(_)) if self.any_busy() => {
+                    // The failed attempt notified waiters, this thread
+                    // included: take the generation again so that wake-up
+                    // does not turn the wait into a retry loop. A release
+                    // landing before the re-read leaves a slot idle, which
+                    // the check below catches.
+                    seen = *lock.lock().unwrap_or_else(|p| p.into_inner());
+                    if self.has_idle_item() {
+                        continue;
+                    }
+                }
                 other => {
                     if other.is_ok() && start.elapsed() > Duration::from_millis(1) {
                         metrics::histogram!(crate::metrics::names::POOL_ACQUIRE_WAIT)
@@ -170,10 +191,12 @@ impl<T: Send + 'static> EvictablePool<T> {
     /// factory (cold start).
     ///
     /// Returns `Err(AcquireError::AllBusy)` if all slots are in use.
-    /// Returns `Err(AcquireError::ReinitFailed)` if an evicted slot's factory call fails;
-    /// in this case the slot is left as `None` (not permanently dead — next acquire retries).
+    /// Returns `Err(AcquireError::ReinitFailed)` if an evicted slot's factory call fails
+    /// and no other slot could serve; the failed slot is left as `None` (not permanently
+    /// dead — the next acquire and the eviction loop retry it).
     pub fn try_acquire(&self) -> Result<EvictableGuard<T>, AcquireError> {
         let now = unix_now_secs();
+        let mut reinit_error = None;
         for slot in &self.slots {
             // Skip slots that are already in use.
             if slot.busy.load(Ordering::Acquire) {
@@ -203,40 +226,24 @@ impl<T: Send + 'static> EvictablePool<T> {
                 slot.busy.store(true, Ordering::Release);
                 drop(guard);
 
-                metrics::counter!(crate::metrics::names::POOL_COLD_STARTS).increment(1);
-                tracing::info!("pool cold start: reinitializing evicted slot");
-                let new_item = match (self.factory)() {
+                let new_item = match self.reinit(slot) {
                     Ok(item) => item,
                     Err(e) => {
-                        tracing::error!("pool slot reinit failed: {e}");
-                        metrics::counter!(crate::metrics::names::POOL_REINIT_FAILURES).increment(1);
-                        self.reinit_failing.store(true, Ordering::Release);
                         // Leave slot as None; clear busy so next acquire can retry.
                         slot.busy.store(false, Ordering::Release);
                         notify_released(&self.released);
-                        return Err(AcquireError::ReinitFailed(e));
+                        // Another slot may still serve: health says the pool
+                        // can serve while any slot is not failing.
+                        reinit_error = Some(e);
+                        continue;
                     }
                 };
 
-                self.reinit_failing.store(false, Ordering::Release);
-
-                // Store the new item and return it under the lock.
-                let mut guard = match slot.item.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => {
-                        tracing::warn!("pool mutex poisoned after reinit — recovering");
-                        metrics::counter!(crate::metrics::names::POOL_MUTEX_POISONED).increment(1);
-                        poisoned.into_inner()
-                    }
-                };
-                *guard = Some(new_item);
                 slot.last_used.store(now, Ordering::Relaxed);
-                let item = guard
-                    .take()
-                    .expect("BUG: slot item missing after reinit completed");
+                slot.reload_failed.store(false, Ordering::Release);
                 return Ok(EvictableGuard {
                     slot: Arc::clone(slot),
-                    item: Some(item),
+                    item: Some(new_item),
                     released: Arc::clone(&self.released),
                 });
             }
@@ -256,7 +263,71 @@ impl<T: Send + 'static> EvictablePool<T> {
                 released: Arc::clone(&self.released),
             });
         }
-        Err(AcquireError::AllBusy)
+        match reinit_error {
+            Some(e) => Err(AcquireError::ReinitFailed(e)),
+            None => Err(AcquireError::AllBusy),
+        }
+    }
+
+    /// Rebuilds an evicted slot through the factory, outside the slot mutex.
+    /// The caller has claimed the slot (`busy`) and holds no lock. Records the
+    /// failure on the slot (`reload_failed`); the caller clears it once the
+    /// rebuilt item is stored, so a slot never reads healthy while empty.
+    fn reinit(&self, slot: &EvictableSlot<T>) -> Result<T, anyhow::Error> {
+        metrics::counter!(crate::metrics::names::POOL_COLD_STARTS).increment(1);
+        tracing::info!("pool cold start: reinitializing evicted slot");
+        match (self.factory)() {
+            Ok(item) => Ok(item),
+            Err(e) => {
+                tracing::error!("pool slot reinit failed: {e}");
+                metrics::counter!(crate::metrics::names::POOL_REINIT_FAILURES).increment(1);
+                slot.reload_failed.store(true, Ordering::Release);
+                Err(e)
+            }
+        }
+    }
+
+    /// Retries every slot whose last rebuild failed, without waiting for a
+    /// request: a front end that stops sending traffic while `/health` is 503
+    /// would otherwise never give the pool the chance to recover. Blocks for
+    /// the duration of a model load: call it from blocking code. Returns how
+    /// many slots recovered.
+    pub fn retry_failed(&self) -> usize {
+        let mut recovered = 0;
+        for slot in &self.slots {
+            if !slot.reload_failed.load(Ordering::Acquire) {
+                continue;
+            }
+            // Claim like `try_acquire` does, so a request cannot rebuild the
+            // same slot at the same time.
+            let guard = match slot.item.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if slot.busy.load(Ordering::Acquire) || guard.is_some() {
+                continue;
+            }
+            slot.busy.store(true, Ordering::Release);
+            drop(guard);
+
+            let rebuilt = self.reinit(slot);
+            let mut guard = match slot.item.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if let Ok(item) = rebuilt {
+                *guard = Some(item);
+                // Item first, flag second: healthy implies a loaded slot.
+                slot.reload_failed.store(false, Ordering::Release);
+                // Fresh stamp: the next idle tick must not evict it again.
+                slot.last_used.store(unix_now_secs(), Ordering::Relaxed);
+                recovered += 1;
+            }
+            slot.busy.store(false, Ordering::Release);
+            drop(guard);
+            notify_released(&self.released);
+        }
+        recovered
     }
 
     /// Evict slots idle longer than `threshold_secs`. Returns count evicted.
@@ -307,6 +378,12 @@ impl<T: Send + 'static> EvictablePool<T> {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     pool.evict_idle(threshold);
                 }));
+                // Slots whose rebuild failed are retried here, each tick, off
+                // the async worker: a rebuild loads a multi-GB model.
+                if pool.has_failed_slots() {
+                    let p = std::sync::Arc::clone(&pool);
+                    let _ = tokio::task::spawn_blocking(move || p.retry_failed()).await;
+                }
                 if let Err(e) = result {
                     let msg = e
                         .downcast_ref::<&str>()
@@ -321,10 +398,49 @@ impl<T: Send + 'static> EvictablePool<T> {
         })
     }
 
-    /// Test helper: force the unhealthy state a failed reinit would leave.
+    /// A loaded slot nobody is using.
+    fn has_idle_item(&self) -> bool {
+        self.slots.iter().any(|s| {
+            !s.busy.load(Ordering::Acquire)
+                && s.item.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+        })
+    }
+
+    fn any_busy(&self) -> bool {
+        self.slots.iter().any(|s| s.busy.load(Ordering::Acquire))
+    }
+
+    fn has_failed_slots(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|s| s.reload_failed.load(Ordering::Acquire))
+    }
+
+    /// Test helper: a pool of `size` evicted slots (nothing loaded yet).
     #[cfg(test)]
-    pub fn set_reinit_failing(&self, failing: bool) {
-        self.reinit_failing.store(failing, Ordering::Release);
+    pub fn evicted(
+        size: usize,
+        idle_secs: u64,
+        factory: Arc<dyn Fn() -> Result<T, anyhow::Error> + Send + Sync>,
+    ) -> Self {
+        let now = unix_now_secs();
+        let slots = (0..size)
+            .map(|_| {
+                Arc::new(EvictableSlot {
+                    item: Mutex::new(None),
+                    busy: std::sync::atomic::AtomicBool::new(false),
+                    last_used: AtomicU64::new(now),
+                    reload_failed: std::sync::atomic::AtomicBool::new(false),
+                })
+            })
+            .collect();
+        Self {
+            slots,
+            factory,
+            idle_secs,
+            released: Arc::new((Mutex::new(0), Condvar::new())),
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+        }
     }
 
     /// Test helper: push all slots' last_used `secs` seconds into the past.
@@ -567,12 +683,117 @@ mod tests {
 
         pool.force_last_used_ago(10);
         pool.evict_idle(1);
+        assert!(pool.is_healthy(), "an evicted slot reloads on demand");
         assert!(pool.acquire().is_err());
         assert!(!pool.is_healthy(), "a failed reinit must be visible");
 
         broken.store(false, Ordering::SeqCst);
         drop(pool.acquire().expect("reinit succeeds now"));
         assert!(pool.is_healthy(), "a successful reinit clears it");
+    }
+
+    /// With two slots, one failing rebuild must not hide that the other can
+    /// serve, and one success must not hide that the other still fails.
+    #[test]
+    fn health_follows_every_slot_not_the_last_reinit() {
+        use std::sync::atomic::AtomicUsize;
+        // First rebuild fails, later ones succeed.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let pool = EvictablePool::evicted(
+            2,
+            1,
+            Arc::new(move || {
+                if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(anyhow::anyhow!("out of memory"))
+                } else {
+                    Ok(1u32)
+                }
+            }),
+        );
+        // Slot 0 fails, the request falls through to slot 1 and is served.
+        let guard = pool.try_acquire().expect("slot 1 serves the request");
+        assert!(pool.is_healthy(), "slot 1 is fine");
+        assert!(pool.slots[0].reload_failed.load(Ordering::SeqCst));
+        drop(guard);
+        // Fail every rebuild now, evict, and exhaust both slots.
+        let pool =
+            EvictablePool::<u32>::evicted(2, 1, Arc::new(|| Err(anyhow::anyhow!("no memory"))));
+        assert!(pool.try_acquire().is_err());
+        assert!(!pool.is_healthy(), "every slot failed");
+    }
+
+    /// The latch of #65: every slot failed, nothing sends a request, and the
+    /// pool must still recover once a rebuild can succeed. Driven through the
+    /// eviction loop alone — no `acquire` after the failure.
+    #[tokio::test]
+    async fn the_eviction_loop_retries_a_failed_reload_without_a_request() {
+        use std::sync::atomic::AtomicBool;
+        let broken = Arc::new(AtomicBool::new(true));
+        let b = broken.clone();
+        let pool = Arc::new(EvictablePool::evicted(
+            1,
+            1,
+            Arc::new(move || {
+                if b.load(Ordering::SeqCst) {
+                    Err(anyhow::anyhow!("out of memory"))
+                } else {
+                    Ok(5u32)
+                }
+            }),
+        ));
+        assert!(pool.try_acquire().is_err());
+        assert!(!pool.is_healthy());
+
+        broken.store(false, Ordering::SeqCst);
+        let handle = pool.spawn_eviction_loop(Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pool.is_healthy() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        handle.abort();
+        assert!(pool.is_healthy(), "no request came, yet the pool recovered");
+        assert_eq!(
+            *pool.slots[0].item.lock().unwrap(),
+            Some(5),
+            "the rebuilt item is resident"
+        );
+    }
+
+    /// A failed reload on one slot must not fail a request while another slot
+    /// is merely busy: the request waits for it.
+    #[test]
+    fn acquire_waits_for_a_busy_slot_when_another_slot_cannot_reload() {
+        use std::sync::atomic::AtomicUsize;
+        // First rebuild succeeds (slot 0, held below), every later one fails.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let pool = Arc::new(
+            EvictablePool::evicted(
+                2,
+                1,
+                Arc::new(move || {
+                    if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(1u32)
+                    } else {
+                        Err(anyhow::anyhow!("out of memory"))
+                    }
+                }),
+            )
+            .with_acquire_timeout(Duration::from_secs(5)),
+        );
+        let held = pool.try_acquire().expect("slot 0 loads");
+        let p = pool.clone();
+        let waiter = std::thread::spawn(move || p.acquire().map(|g| *g));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!waiter.is_finished(), "failed instead of waiting");
+        assert!(
+            calls.load(Ordering::SeqCst) <= 3,
+            "the waiter retried the reload in a loop: {} attempts",
+            calls.load(Ordering::SeqCst)
+        );
+        drop(held);
+        assert_eq!(waiter.join().unwrap().expect("served by slot 0"), 1);
     }
 
     // ── B2. factory_error_returns_err_and_slot_stays_alive ──────────────────

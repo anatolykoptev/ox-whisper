@@ -24,6 +24,7 @@ async fn serve(max_buffer_s: &'static str) -> std::net::SocketAddr {
     let state = Arc::new(AppState {
         models: Models::empty(),
         config,
+        shutdown: crate::server::ShutdownSignal::inert(),
     });
     let app = Router::new()
         .route("/v1/listen", get(super::ws_listen))
@@ -204,4 +205,72 @@ async fn a_sample_rate_other_than_16k_is_refused_before_the_upgrade() {
         .await
         .unwrap();
     assert_eq!(next_json(&mut ws).await.unwrap()["type"], "Metadata");
+}
+
+/// The per-frame VAD pass covers the whole buffer: run on a tokio worker it
+/// stalls every other task for as long as it takes (or waits for the shared
+/// detector). A heartbeat on the same single-threaded runtime must keep
+/// ticking while a pass waits on a detector that another thread holds.
+#[tokio::test(flavor = "current_thread")]
+async fn the_vad_pass_does_not_stall_the_runtime() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut config = Config::from_lookup(&|k| (k == "WS_MAX_BUFFER_S").then(|| "120".into()));
+    config.vad_model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/vad/silero_vad.onnx")
+        .to_string_lossy()
+        .into_owned();
+    config.max_audio_duration_s = 120.0;
+    let mut models = Models::empty();
+    models.vad = crate::models::load_vad(&config);
+    assert!(models.vad.is_some(), "VAD fixture loads");
+    let state = Arc::new(AppState {
+        models,
+        config,
+        shutdown: crate::server::ShutdownSignal::inert(),
+    });
+    let app = Router::new()
+        .route("/v1/listen", get(super::ws_listen))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/listen"))
+        .await
+        .unwrap();
+    assert_eq!(next_json(&mut ws).await.unwrap()["type"], "Metadata");
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let t = ticks.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            t.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    tokio::task::yield_now().await;
+
+    // Another thread holds the detector for 400 ms: the pass has to wait.
+    let held = state.clone();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _detector = crate::vad::lock_vad(held.models.vad.as_ref().unwrap());
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+    });
+    locked_rx.recv().unwrap();
+
+    // The frame is handled in order, so the answer to Finalize arrives only
+    // after the VAD pass over the audio before it.
+    ws.send(pcm_seconds(2)).await.unwrap();
+    ws.send(ClientMsg::Text(r#"{"type":"Finalize"}"#.into()))
+        .await
+        .unwrap();
+    let before = ticks.load(Ordering::SeqCst);
+    let _ = next_json(&mut ws).await;
+    let during = ticks.load(Ordering::SeqCst) - before;
+    assert!(
+        during >= 50,
+        "the runtime stalled during the VAD pass: {during} ticks"
+    );
 }

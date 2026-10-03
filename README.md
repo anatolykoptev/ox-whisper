@@ -212,7 +212,7 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | `MAX_AUDIO_DURATION_S` | `0` | Max input length, `0`=unlimited |
 | `WS_MAX_BUFFER_S` | `120` | Longest audio a WebSocket session may buffer; past it the client gets an `Error` frame and the connection closes (also capped by `MAX_AUDIO_DURATION_S` when set) |
 | `MAX_CHUNK_S` | `30` | Decode window: audio longer than this is cut at the quietest point of each window's last fifth; anything up to it decodes in one piece |
-| `SHUTDOWN_DRAIN_S` | `8` | After SIGTERM/SIGINT: WebSocket sessions get a `1001` Close at once, in-flight requests get this long to finish, then the process exits with status 1. Raise Docker's `stop_grace_period` along with it (default 10 s) |
+| `SHUTDOWN_DRAIN_S` | `8` | After SIGTERM/SIGINT: WebSocket sessions get a `1001` Close at once; sessions and in-flight requests together get this long to finish (a session in the middle of a decode finishes it first), then the process exits with status 1. The runtime teardown after that is capped at 1 s. Raise Docker's `stop_grace_period` along with it (default 10 s) |
 | `OXWHISPER_PROM_PORT` | `9092` | Prometheus metrics port |
 
 <details>

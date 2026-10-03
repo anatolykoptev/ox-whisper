@@ -20,6 +20,7 @@ mod openai;
 mod paragraphs;
 mod pii;
 mod pool;
+mod server;
 mod smart_format;
 mod spelling;
 mod tmpfile;
@@ -67,7 +68,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let state = Arc::new(AppState { models, config });
+    let drain = std::time::Duration::from_secs(config.shutdown_drain_s);
+    let (trigger, shutdown) = server::ShutdownSignal::channel();
+    let state = Arc::new(AppState {
+        models,
+        config,
+        shutdown,
+    });
 
     let app = Router::new()
         .route("/health", get(handlers::health))
@@ -84,9 +91,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting ox-whisper on {}", addr);
 
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    if server::serve(listener, app, shutdown_signal(), trigger, drain).await?
+        == server::Outcome::TimedOut
+    {
+        // Returning would drop the runtime, which waits for every decode still
+        // running on the blocking pool: the hang the drain bound exists to end.
+        std::process::exit(1);
+    }
 
     Ok(())
 }

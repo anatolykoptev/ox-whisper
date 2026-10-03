@@ -76,6 +76,7 @@ fn state_with_upload_dir(dir: &std::path::Path) -> Arc<AppState> {
     Arc::new(AppState {
         models: Models::empty(),
         config,
+        shutdown: crate::server::ShutdownSignal::inert(),
     })
 }
 
@@ -189,6 +190,7 @@ async fn a_file_is_not_deleted_under_a_running_job() {
     let state = Arc::new(AppState {
         models: Models::empty(),
         config,
+        shutdown: crate::server::ShutdownSignal::inert(),
     });
 
     let mut body = file_part("file", &[3u8; 2048]);

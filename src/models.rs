@@ -12,6 +12,11 @@ use crate::transcribe::TranscribeError;
 /// Model id reported by `/health` and `/v1/models`.
 pub const PARAKEET_MODEL_NAME: &str = "parakeet-tdt-0.6b-v3";
 
+/// `/health` precision of the `*.onnx` set (fp32 in the shipped image).
+pub const PRECISION_FULL: &str = "full";
+/// `/health` precision of the `*.int8.onnx` set.
+pub const PRECISION_INT8: &str = "int8";
+
 /// Pool label in metrics.
 pub const PARAKEET_POOL_LABEL: &str = "parakeet";
 
@@ -20,6 +25,9 @@ pub struct Models {
     /// [`Models::load`] refuses to start without it.
     pub parakeet: Option<Arc<EvictablePool<TransducerRecognizer>>>,
     pub vad: Option<Mutex<SileroVad>>,
+    /// Which export is loaded ([`PRECISION_FULL`] or [`PRECISION_INT8`]), for
+    /// `/health`. `None` only in tests.
+    pub parakeet_precision: Option<&'static str>,
     /// Eviction loop handles — aborted on drop to stop background tasks.
     eviction_handles: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -37,7 +45,7 @@ impl Models {
     /// with no other model to fall back to, a service that started anyway would
     /// answer `/health` while failing every transcription.
     pub fn load(config: &Config) -> Result<Self, String> {
-        let parakeet = load_parakeet(config).ok_or_else(|| {
+        let (parakeet, precision) = load_parakeet(config).ok_or_else(|| {
             format!(
                 "Parakeet model not loaded from {} (see the log above); \
                  ox-whisper has no other model to serve with",
@@ -64,6 +72,7 @@ impl Models {
         Ok(Self {
             parakeet: Some(parakeet),
             vad,
+            parakeet_precision: Some(precision),
             eviction_handles,
         })
     }
@@ -75,6 +84,7 @@ impl Models {
         Self {
             parakeet: None,
             vad: None,
+            parakeet_precision: None,
             eviction_handles: Vec::new(),
         }
     }
@@ -99,7 +109,9 @@ impl Models {
 /// in `encoder.weights`) or, failing that, `.int8.onnx`, plus `tokens.txt`.
 /// The model type is fixed here — never inferred by reading the multi-GB
 /// encoder into memory.
-fn load_parakeet(config: &Config) -> Option<Arc<EvictablePool<TransducerRecognizer>>> {
+fn load_parakeet(
+    config: &Config,
+) -> Option<(Arc<EvictablePool<TransducerRecognizer>>, &'static str)> {
     let dir = &config.parakeet_dir;
     let files = match pick_model_files(dir) {
         Ok(f) => f,
@@ -108,9 +120,20 @@ fn load_parakeet(config: &Config) -> Option<Arc<EvictablePool<TransducerRecogniz
             return None;
         }
     };
+    let precision = files.precision();
     let encoder = files.encoder.clone();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let unresolved = unresolved_external_data(Path::new(&encoder), &cwd);
+    let unresolved = match unresolved_external_data(Path::new(&encoder), &cwd) {
+        Ok(u) => u,
+        Err(e) => {
+            // Not knowing is not a pass: a missed reference aborts the process
+            // inside onnxruntime later, with no message.
+            tracing::error!(
+                "Parakeet: cannot check {encoder} for external weights: {e}. Parakeet not loaded"
+            );
+            return None;
+        }
+    };
     if !unresolved.is_empty() {
         tracing::error!(
             "Parakeet: {encoder} keeps its weights in {unresolved:?}, which onnxruntime \
@@ -179,7 +202,7 @@ fn load_parakeet(config: &Config) -> Option<Arc<EvictablePool<TransducerRecogniz
             config.pool_acquire_timeout_s,
         ));
     metrics::gauge!(metric_names::POOL_SIZE, "lang" => PARAKEET_POOL_LABEL).set(size as f64);
-    Some(Arc::new(pool))
+    Some((Arc::new(pool), precision))
 }
 
 /// Files beside `encoder` that it references as external data and that
@@ -188,47 +211,86 @@ fn load_parakeet(config: &Config) -> Option<Arc<EvictablePool<TransducerRecogniz
 /// `*.onnx.data`) is looked up relative to the process working directory, not
 /// the model directory — and a miss throws through the C API and aborts the
 /// process. An encoder references a file by name, so any sibling whose name
-/// occurs in the encoder's bytes counts. Encoders over 512 MiB are
-/// self-contained (int8): their weights are inline.
-fn unresolved_external_data(encoder: &Path, cwd: &Path) -> Vec<String> {
-    const MAX_GRAPH_BYTES: u64 = 512 << 20;
+/// occurs in the encoder's bytes counts. The encoder is scanned as a stream,
+/// whatever its size (the int8 graph is over 2 GB), and any I/O error is an
+/// error: a check that could not run must not read as "nothing missing".
+fn unresolved_external_data(encoder: &Path, cwd: &Path) -> Result<Vec<String>, String> {
+    unresolved_external_data_in(encoder, cwd, SCAN_BLOCK)
+}
+
+/// Bytes read per step when scanning an encoder for sibling file names.
+const SCAN_BLOCK: usize = 8 << 20;
+
+fn unresolved_external_data_in(
+    encoder: &Path,
+    cwd: &Path,
+    block: usize,
+) -> Result<Vec<String>, String> {
     let Some(dir) = encoder.parent() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    match std::fs::metadata(encoder) {
-        Ok(m) if m.len() <= MAX_GRAPH_BYTES => {}
-        _ => return Vec::new(),
-    }
-    let Ok(graph) = std::fs::read(encoder) else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut unresolved = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    let mut siblings = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("reading {}: {e}", dir.display()))?
+            .path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if path == encoder || !path.is_file() || !contains(&graph, name.as_bytes()) {
+        if path != encoder && path.is_file() && !name.is_empty() {
+            siblings.push((name.to_string(), path));
+        }
+    }
+    let names: Vec<&str> = siblings.iter().map(|(n, _)| n.as_str()).collect();
+    let referenced = referenced_names(encoder, &names, block)
+        .map_err(|e| format!("reading {}: {e}", encoder.display()))?;
+    let mut unresolved = Vec::new();
+    for ((name, path), referenced) in siblings.iter().zip(referenced) {
+        if !referenced {
             continue;
         }
-        let seen = cwd.join(name);
-        let same = match (seen.canonicalize(), path.canonicalize()) {
+        let same = match (cwd.join(name).canonicalize(), path.canonicalize()) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
         };
         if !same {
-            unresolved.push(name.to_string());
+            unresolved.push(name.clone());
         }
     }
     unresolved.sort();
-    unresolved
+    Ok(unresolved)
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+/// For each of `names`, whether its bytes occur in the file. Reads `block`
+/// bytes at a time and carries the longest name's length minus one over to the
+/// next block, so a name that straddles a block boundary is still found.
+fn referenced_names(path: &Path, names: &[&str], block: usize) -> std::io::Result<Vec<bool>> {
+    use memchr::memmem::Finder;
+    use std::io::Read;
+    let finders: Vec<Finder> = names.iter().map(|n| Finder::new(n.as_bytes())).collect();
+    let mut found = vec![false; names.len()];
+    if names.is_empty() {
+        return Ok(found);
+    }
+    let keep = names.iter().map(|n| n.len()).max().unwrap_or(1) - 1;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; keep + block.max(1)];
+    let mut carried = 0;
+    loop {
+        let n = file.read(&mut buf[carried..])?;
+        if n == 0 {
+            return Ok(found);
+        }
+        let end = carried + n;
+        for (finder, hit) in finders.iter().zip(found.iter_mut()) {
+            if !*hit && finder.find(&buf[..end]).is_some() {
+                *hit = true;
+            }
+        }
+        carried = keep.min(end);
+        buf.copy_within(end - carried..end, 0);
+    }
 }
 
 /// The encoder, decoder and joiner of one export, all of one precision.
@@ -238,6 +300,17 @@ struct ModelFiles {
     decoder: String,
     joiner: String,
     int8: bool,
+}
+
+impl ModelFiles {
+    /// The label `/health` reports for this set.
+    fn precision(&self) -> &'static str {
+        if self.int8 {
+            PRECISION_INT8
+        } else {
+            PRECISION_FULL
+        }
+    }
 }
 
 /// Chooses the model set in `dir`: the full-precision (`*.onnx`, fp32/fp16)
@@ -371,11 +444,13 @@ mod tests {
             got.int8 && got.decoder.ends_with("decoder.int8.onnx"),
             "{got:?}"
         );
+        assert_eq!(got.precision(), "int8");
 
         // Both complete: full precision, whatever the sort order.
         touch(&full);
         let got = pick_model_files(&d).unwrap();
         assert!(!got.int8 && got.joiner.ends_with("/joiner.onnx"), "{got:?}");
+        assert_eq!(got.precision(), "full");
 
         // A full-precision encoder alone does not drag an int8 decoder along:
         // the full set is incomplete, so the whole int8 set is used.
@@ -416,14 +491,23 @@ mod tests {
         std::fs::write(model.join("tokens.txt"), b"t").unwrap();
 
         assert_eq!(
-            unresolved_external_data(&encoder, &elsewhere),
+            unresolved_external_data(&encoder, &elsewhere).unwrap(),
             vec!["encoder.weights".to_string()]
         );
         // A different file of the same name in the working directory is not it.
         std::fs::write(elsewhere.join("encoder.weights"), b"other").unwrap();
-        assert_eq!(unresolved_external_data(&encoder, &elsewhere).len(), 1);
+        assert_eq!(
+            unresolved_external_data(&encoder, &elsewhere)
+                .unwrap()
+                .len(),
+            1
+        );
         // Positive case: the container runs with working_dir = model dir.
-        assert!(unresolved_external_data(&encoder, &model).is_empty());
+        assert!(
+            unresolved_external_data(&encoder, &model)
+                .unwrap()
+                .is_empty()
+        );
 
         for f in ["encoder.onnx", "encoder.weights", "tokens.txt"] {
             std::fs::remove_file(model.join(f)).unwrap();
@@ -443,16 +527,89 @@ mod tests {
         std::fs::write(&encoder, b"location encoder.onnx.data").unwrap();
         std::fs::write(model.join("encoder.onnx.data"), b"w").unwrap();
         assert_eq!(
-            unresolved_external_data(&encoder, &elsewhere),
+            unresolved_external_data(&encoder, &elsewhere).unwrap(),
             vec!["encoder.onnx.data".to_string()]
         );
         let int8 = model.join("encoder.int8.onnx");
         std::fs::write(&int8, b"self-contained graph").unwrap();
-        assert!(unresolved_external_data(&int8, &elsewhere).is_empty());
+        assert!(
+            unresolved_external_data(&int8, &elsewhere)
+                .unwrap()
+                .is_empty()
+        );
 
         for f in ["encoder.onnx", "encoder.onnx.data", "encoder.int8.onnx"] {
             std::fs::remove_file(model.join(f)).unwrap();
         }
+        std::fs::remove_dir(&model).unwrap();
+        std::fs::remove_dir(&elsewhere).unwrap();
+    }
+
+    /// A check that could not run is an error, not an empty "all clear": an
+    /// encoder that cannot be read (here, a directory where the file should be).
+    #[test]
+    fn an_unreadable_encoder_is_an_error_not_a_pass() {
+        let model = scratch("unreadable");
+        let encoder = model.join("encoder.onnx");
+        std::fs::create_dir(&encoder).unwrap();
+        std::fs::write(model.join("encoder.weights"), b"w").unwrap();
+        let err = unresolved_external_data(&encoder, &model).unwrap_err();
+        assert!(err.contains("encoder.onnx"), "{err}");
+        // A model directory that cannot be listed is an error too.
+        let gone = model.join("missing").join("encoder.onnx");
+        assert!(unresolved_external_data(&gone, &model).is_err());
+        std::fs::remove_file(model.join("encoder.weights")).unwrap();
+        std::fs::remove_dir(&encoder).unwrap();
+        std::fs::remove_dir(&model).unwrap();
+    }
+
+    /// A name that straddles a read-block boundary is still found.
+    #[test]
+    fn a_name_across_a_block_boundary_is_found() {
+        let model = scratch("straddle");
+        let elsewhere = scratch("straddle-cwd");
+        let encoder = model.join("encoder.onnx");
+        std::fs::write(model.join("encoder.weights"), b"w").unwrap();
+        for offset in 0..8usize {
+            let mut bytes = vec![0u8; 32];
+            bytes[offset + 4..offset + 4 + 15].copy_from_slice(b"encoder.weights");
+            std::fs::write(&encoder, &bytes).unwrap();
+            // 8-byte blocks: the name crosses a boundary for most offsets.
+            let got = unresolved_external_data_in(&encoder, &elsewhere, 8).unwrap();
+            assert_eq!(got, vec!["encoder.weights".to_string()], "offset {offset}");
+        }
+        std::fs::write(&encoder, vec![0u8; 32]).unwrap();
+        assert!(
+            unresolved_external_data_in(&encoder, &elsewhere, 8)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_file(model.join("encoder.weights")).unwrap();
+        std::fs::remove_file(&encoder).unwrap();
+        std::fs::remove_dir(&model).unwrap();
+        std::fs::remove_dir(&elsewhere).unwrap();
+    }
+
+    /// The scan has no size cutoff: an encoder over 512 MiB that names an
+    /// unresolvable sidecar is reported like a small one (sparse file, so the
+    /// test stores almost nothing).
+    #[test]
+    fn a_large_encoder_is_scanned_not_skipped() {
+        use std::io::{Seek, SeekFrom, Write};
+        let model = scratch("large");
+        let elsewhere = scratch("large-cwd");
+        let encoder = model.join("encoder.onnx");
+        std::fs::write(model.join("encoder.weights"), b"w").unwrap();
+        let mut f = std::fs::File::create(&encoder).unwrap();
+        f.seek(SeekFrom::Start(600 << 20)).unwrap();
+        f.write_all(b"encoder.weights").unwrap();
+        drop(f);
+        assert_eq!(
+            unresolved_external_data(&encoder, &elsewhere).unwrap(),
+            vec!["encoder.weights".to_string()]
+        );
+        std::fs::remove_file(model.join("encoder.weights")).unwrap();
+        std::fs::remove_file(&encoder).unwrap();
         std::fs::remove_dir(&model).unwrap();
         std::fs::remove_dir(&elsewhere).unwrap();
     }

@@ -75,9 +75,21 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
     }
 
     let mut session = WsSession::new(params.sample_rate, state.config.ws_max_buffer_samples());
+    let mut shutdown = state.shutdown.clone();
 
     loop {
-        let msg = match socket.recv().await {
+        // Upgraded connections are not drained by the HTTP server's graceful
+        // shutdown: a session left open would pin it until the drain ran out.
+        // Tell the client to reconnect instead (1001), at a message boundary.
+        let received = tokio::select! {
+            biased;
+            _ = shutdown.fired() => {
+                close_with(&mut socket, close_code::AWAY, "server shutting down").await;
+                break;
+            }
+            received = socket.recv() => received,
+        };
+        let msg = match received {
             Some(Ok(msg)) => msg,
             Some(Err(e)) => {
                 tracing::debug!("WS recv error: {}", e);
@@ -97,14 +109,28 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
                         },
                     )
                     .await;
-                    close_too_big(&mut socket).await;
+                    close_with(&mut socket, close_code::SIZE, "audio buffer limit reached").await;
                     break;
                 }
 
                 // VAD check if enabled
                 if params.vad {
-                    let (vad_msgs, speech_final) =
-                        session.run_vad_check(&state.models, &state.config);
+                    // A VAD pass over the whole buffer runs per frame: on the
+                    // blocking pool, not on a tokio worker.
+                    let st = state.clone();
+                    let checked = tokio::task::spawn_blocking(move || {
+                        let out = session.run_vad_check(&st.models, &st.config);
+                        (session, out)
+                    })
+                    .await;
+                    let (returned, (vad_msgs, speech_final)) = match checked {
+                        Ok(done) => done,
+                        Err(e) => {
+                            tracing::error!("WS VAD check failed: {e}");
+                            break;
+                        }
+                    };
+                    session = returned;
                     for m in vad_msgs {
                         if send_msg(&mut socket, &m).await.is_err() {
                             return;
@@ -156,15 +182,15 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, params: WsParams
     }
 }
 
-/// Closes the socket properly after a buffer overrun: a Close frame with 1009
-/// (message too big), then a short bounded wait for the client's reply while
+/// Closes the socket properly: a Close frame with `code` (1009 after a buffer
+/// overrun, 1001 on shutdown), then a short bounded wait for the client's reply while
 /// reading and discarding what it still sends. Dropping the socket with
 /// unread inbound frames makes the kernel send a reset, and the client can
 /// lose the Error frame that explains the close.
-async fn close_too_big(socket: &mut WebSocket) {
+async fn close_with(socket: &mut WebSocket, code: u16, reason: &'static str) {
     let frame = CloseFrame {
-        code: close_code::SIZE,
-        reason: "audio buffer limit reached".into(),
+        code,
+        reason: reason.into(),
     };
     if socket.send(Message::Close(Some(frame))).await.is_err() {
         return;

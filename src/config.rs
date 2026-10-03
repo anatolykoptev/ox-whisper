@@ -51,6 +51,11 @@ pub struct Config {
     /// Longest audio a WebSocket session may buffer, seconds (WS_MAX_BUFFER_S,
     /// default: 120). Past it the session gets an error and is closed.
     pub ws_max_buffer_s: usize,
+    /// How long in-flight requests get to finish after SIGTERM/SIGINT, seconds
+    /// (SHUTDOWN_DRAIN_S, default: 8, under Docker's 10 s stop grace). Live
+    /// WebSocket sessions are told to close at once; whatever is still running
+    /// when this runs out is cut off and the process exits non-zero.
+    pub shutdown_drain_s: u64,
     /// Test-only: how long `transcribe` stalls before reading its input, so a
     /// test can drop the handler while the blocking job is running.
     #[cfg(test)]
@@ -192,6 +197,7 @@ impl Config {
             prom_port: parse_env(get, "OXWHISPER_PROM_PORT").unwrap_or(9092),
             upload_dir: env::temp_dir(),
             ws_max_buffer_s: env_num(get, "WS_MAX_BUFFER_S", 1, 120),
+            shutdown_drain_s: env_num(get, "SHUTDOWN_DRAIN_S", 1, 8),
             #[cfg(test)]
             decode_delay: std::time::Duration::ZERO,
         }

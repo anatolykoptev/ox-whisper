@@ -785,6 +785,7 @@ dependencies = [
  "flate2",
  "futures-core",
  "futures-util",
+ "memchr",
  "metrics",
  "metrics-exporter-prometheus",
  "regex",

@@ -144,8 +144,10 @@ the fp32 export; the int8 one measured about 4 WER points worse and is loaded on
 precision file is present. With one slot, a second concurrent request waits
 (`POOL_ACQUIRE_TIMEOUT_S`) instead of failing.
 
-`/health` answers 503 (`"status": "degraded"`) while Parakeet cannot serve, for example after a
-failed reload.
+`/health` answers 503 (`"status": "degraded"`) while Parakeet cannot serve: no slot can be
+reloaded. It reports `precision` (`full` for the `*.onnx` set, `int8` for the weaker fallback).
+With eviction on, a slot whose reload failed is retried in the background on every eviction tick,
+so `/health` recovers without a request arriving.
 
 **Need 99 languages?** Use `whisper-large-v3` instead — ox-whisper trades coverage for speed and CPU footprint.
 
@@ -210,6 +212,7 @@ For comparison on the same box: `faster-whisper tiny int8` ~0.075 RTF, `whisper.
 | `MAX_AUDIO_DURATION_S` | `0` | Max input length, `0`=unlimited |
 | `WS_MAX_BUFFER_S` | `120` | Longest audio a WebSocket session may buffer; past it the client gets an `Error` frame and the connection closes (also capped by `MAX_AUDIO_DURATION_S` when set) |
 | `MAX_CHUNK_S` | `30` | Decode window: audio longer than this is cut at the quietest point of each window's last fifth; anything up to it decodes in one piece |
+| `SHUTDOWN_DRAIN_S` | `8` | After SIGTERM/SIGINT: WebSocket sessions get a `1001` Close at once, in-flight requests get this long to finish, then the process exits with status 1. Raise Docker's `stop_grace_period` along with it (default 10 s) |
 | `OXWHISPER_PROM_PORT` | `9092` | Prometheus metrics port |
 
 <details>

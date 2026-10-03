@@ -8,6 +8,7 @@
 |------|------|
 | `src/main.rs` | Axum server, route wiring |
 | `src/config.rs` | Environment config |
+| `src/server.rs` | Serve loop: graceful shutdown with a bounded drain; `ShutdownSignal` tells WebSocket sessions to close (1001) |
 | `src/handlers.rs` · `src/handler_openai.rs` | `/health`; the OpenAI-compatible transcription endpoint |
 | `src/ws_handler.rs` · `src/ws_session.rs` | WebSocket streaming |
 | `src/language.rs` | The language hint: validated against Parakeet's 25 languages, else 400 |

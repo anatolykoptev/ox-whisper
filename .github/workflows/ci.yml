@@ -14,7 +14,77 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # docs-gate: canonical docs-only detector. Inserted by scripts/docs-gate.rb; the
+  # `check` mode compares this block byte for byte, so edit it HERE, never per repo.
+  # Spec and failure semantics: ~/.claude/skills/ci-setup/specs/docs-only-fastpath.md
+  docs-scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      - id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          # docs_only=true only on a positive, complete answer; every doubt means full CI.
+          is_doc() {
+            case "$1" in
+              *.md | docs/* | doc/* | LICENSE | LICENSE.* | LICENSE-* | COPYING | NOTICE | AUTHORS) return 0 ;;
+              .github/ISSUE_TEMPLATE/* | .github/PULL_REQUEST_TEMPLATE* | .github/CODEOWNERS) return 0 ;;
+            esac
+            return 1
+          }
+          why=
+          touched() { # every touched path (rename sources included); non-zero on any doubt
+            local url page=1 resp n
+            case "$EVENT" in
+              pull_request) url="$API/repos/$REPO/pulls/$PR/files" ;;
+              push)
+                [ -n "${BEFORE//0/}" ] || { why="push without a usable before sha"; return 1; }
+                url="$API/repos/$REPO/compare/$BEFORE...$AFTER" ;;
+              *) why="event $EVENT"; return 1 ;;
+            esac
+            while :; do
+              resp=$(curl -fsS --retry 2 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$url?per_page=100&page=$page") || { why="API error on page $page"; return 1; }
+              if [ "$EVENT" = push ] && [ "$page" = 1 ]; then
+                [ "$(jq -r .status <<<"$resp")" = ahead ] || { why="push is not a fast-forward"; return 1; }
+              fi
+              n=$(jq -r '(if type == "array" then . else .files end) | length' <<<"$resp") || { why="unreadable page $page"; return 1; }
+              [[ $n =~ ^[0-9]+$ ]] || { why="unreadable page $page"; return 1; }
+              jq -r '(if type == "array" then . else .files end) | .[] | .filename, (.previous_filename // empty)' <<<"$resp" || { why="unreadable page $page"; return 1; }
+              # compare lists at most 300 files: 300 or more may be a truncated list
+              if [ "$EVENT" = push ] && [ "$n" -ge 100 ]; then why="push may exceed the compare file cap"; [ "$page" -lt 3 ] || return 1; fi
+              [ "$n" -ge 100 ] || { why=; return 0; }
+              page=$((page + 1))
+              [ "$page" -le 30 ] || { why="3000 files or more"; return 1; }
+            done
+          }
+          docs_only=false
+          # `if !` keeps errexit off for the whole listing: every doubt is an explicit return 1
+          if ! list=$(touched); then
+            why=${why:-listing failed}
+          elif [ -z "$list" ]; then
+            why="no changed paths"
+          else
+            docs_only=true
+            while IFS= read -r f; do is_doc "$f" || { docs_only=false; why="code path: $f"; break; }; done <<<"$list"
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs-only: $docs_only${why:+ ($why)}" >> "$GITHUB_STEP_SUMMARY"
+
   fmt:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -27,6 +97,8 @@ jobs:
         run: cargo fmt --check
 
   build:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
@@ -41,6 +113,8 @@ jobs:
         run: docker buildx build --platform linux/arm64 .
 
   test:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5

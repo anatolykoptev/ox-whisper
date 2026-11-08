@@ -1,6 +1,8 @@
 # ox-whisper — Speech-to-Text Server
 
-**Rust** 1.93 edition 2024 | Docker container on port 8092
+**Rust** 1.88 edition 2024 (the version CI and the Dockerfile builder use) | Docker container on port 8092
+
+Every document is indexed in [docs/INDEX.md](docs/INDEX.md).
 
 ## Structure
 
@@ -47,6 +49,32 @@ The container needs `working_dir` = the Parakeet directory (the fp32 encoder res
 `encoder.weights` from the working directory), about 7 GB of `mem_limit`,
 `PARAKEET_POOL_SIZE=1` and `PARAKEET_IDLE_EVICT_SECS=0` (see README, Languages). Rollback is the
 previous image tag.
+
+## Gate
+
+CI (`.github/workflows/ci.yml`) runs three jobs, all of which must pass: `fmt` (`cargo fmt --check`),
+`build` (`docker buildx build --platform linux/arm64 .`, the full image on a native arm64 runner),
+and `test` (`cargo nextest run --workspace --locked` with `SHERPA_LIB_PATH` and `LD_LIBRARY_PATH`
+pointing at `vendor/sherpa-onnx`). Run the same locally with `cargo fmt --check`, `docker build .` and
+`cargo nextest run --workspace --locked`. Clippy is not in CI; `make lint` is optional but keep new
+code warning-free. A pull request that changes only documents (Markdown, `docs/`, licence, issue and
+PR templates) skips the jobs through the `docs-scope` block in `ci.yml`; that block is canonical
+across the fleet and compared byte for byte, so do not edit it here.
+
+## Invariants that are easy to break
+
+- **Versions come from release-please** (Conventional Commits). Never edit `Cargo.toml`'s version,
+  `CHANGELOG.md` or `.release-please-manifest.json` by hand, and never tag manually.
+- **`vendor/` is vendored code.** `vendor/sherpa-rs*` and the prebuilt `.so` files under
+  `vendor/sherpa-onnx/` are built for aarch64; do not hand-edit them or add an x86_64 build here.
+- **The service has no authentication.** It is meant to sit behind a reverse proxy; do not add a
+  feature that assumes callers are trusted with anything more than transcription.
+- **The `language` field is a checked hint, not a route.** An unsupported value is a 400 before any
+  decode; do not reintroduce a silent fallback model.
+- **Post-processing options are pure text transforms** (`smart_format`, `redact`, `paragraphs`,
+  `custom_spelling`, `keywords`); keep them free of I/O and model calls.
+- **This repository is public.** No hostnames, operator paths, account names, tokens or personal
+  data in any tracked file, fixtures and docs included.
 
 ## Gotchas
 

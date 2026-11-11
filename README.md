@@ -1,7 +1,7 @@
 # ox-whisper — Self-Hosted Whisper API Alternative
 
 [![Build](https://github.com/anatolykoptev/ox-whisper/actions/workflows/ci.yml/badge.svg)](https://github.com/anatolykoptev/ox-whisper/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](Cargo.toml)
 [![Platform](https://img.shields.io/badge/platform-linux%2Faarch64-blue)](#limitations)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://ghcr.io/anatolykoptev/ox-whisper)
@@ -312,4 +312,4 @@ indexed in [docs/INDEX.md](docs/INDEX.md).
 
 ## License
 
-MIT. Built on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CC-BY-4.0, NVIDIA), [Silero VAD](https://github.com/snakers4/silero-vad).
+Dual-licensed under [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE), at your option. Code under `vendor/` (the sherpa-rs bindings, MIT) keeps its own licence. Built on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CC-BY-4.0, NVIDIA), [Silero VAD](https://github.com/snakers4/silero-vad).

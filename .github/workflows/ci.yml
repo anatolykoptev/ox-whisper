@@ -55,7 +55,7 @@ jobs:
               *) why="event $EVENT"; return 1 ;;
             esac
             while :; do
-              resp=$(curl -fsS --retry 2 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$url?per_page=100&page=$page") || { why="API error on page $page"; return 1; }
+              resp=$(printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl -fsS --retry 2 -K - -H "Accept: application/vnd.github+json" "$url?per_page=100&page=$page") || { why="API error on page $page"; return 1; }
               if [ "$EVENT" = push ] && [ "$page" = 1 ]; then
                 [ "$(jq -r .status <<<"$resp")" = ahead ] || { why="push is not a fast-forward"; return 1; }
               fi

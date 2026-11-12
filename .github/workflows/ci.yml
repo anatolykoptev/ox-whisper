@@ -17,6 +17,9 @@ jobs:
   # docs-gate: canonical docs-only detector. Inserted by scripts/docs-gate.rb; the
   # `check` mode compares this block byte for byte, so edit it HERE, never per repo.
   # Spec and failure semantics: ~/.claude/skills/ci-setup/specs/docs-only-fastpath.md
+  # A doc is a doc only if no code reads it: a changed `.md`/`docs/` path that a non-doc
+  # tracked file names (test, embed, build script) is reclassified as code, and the job log
+  # says which file referenced it. Glob/dir reads the scan cannot see: --not-doc / --skip-job.
   docs-scope:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -35,6 +38,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
+          SERVER: ${{ github.server_url }}
         run: |
           # docs_only=true only on a positive, complete answer; every doubt means full CI.
           is_doc() {
@@ -45,8 +49,9 @@ jobs:
             return 1
           }
           why=
+          LIST=
           touched() { # every touched path (rename sources included); non-zero on any doubt
-            local url page=1 resp n
+            local url page=1 resp n part
             case "$EVENT" in
               pull_request) url="$API/repos/$REPO/pulls/$PR/files" ;;
               push)
@@ -61,7 +66,8 @@ jobs:
               fi
               n=$(jq -r '(if type == "array" then . else .files end) | length' <<<"$resp") || { why="unreadable page $page"; return 1; }
               [[ $n =~ ^[0-9]+$ ]] || { why="unreadable page $page"; return 1; }
-              jq -r '(if type == "array" then . else .files end) | .[] | .filename, (.previous_filename // empty)' <<<"$resp" || { why="unreadable page $page"; return 1; }
+              part=$(jq -r '(if type == "array" then . else .files end) | .[] | .filename, (.previous_filename // empty)' <<<"$resp") || { why="unreadable page $page"; return 1; }
+              LIST+=$part$'\n'
               # compare lists at most 300 files: 300 or more may be a truncated list
               if [ "$EVENT" = push ] && [ "$n" -ge 100 ]; then why="push may exceed the compare file cap"; [ "$page" -lt 3 ] || return 1; fi
               [ "$n" -ge 100 ] || { why=; return 0; }
@@ -69,18 +75,162 @@ jobs:
               [ "$page" -le 30 ] || { why="3000 files or more"; return 1; }
             done
           }
+          # --- reference-aware pass: a doc that code reads is code ----------------------------
+          scratch=
+          cleanup() { if [ -n "$scratch" ] && [ -d "$scratch" ]; then rm -rf -- "$scratch"; fi; return 0; }
+          trap cleanup EXIT
+          # packaging manifests name README/CHANGELOG to ship it, not to read it
+          pkg_manifest() {
+            case "${1##*/}" in
+              Cargo.toml | Cargo.lock | package.json | package-lock.json | pnpm-lock.yaml | pyproject.toml | setup.py | setup.cfg | MANIFEST.in | composer.json | *.gemspec | Dockerfile* | .goreleaser.y*ml | release-please-config.json) return 0 ;;
+            esac
+            return 1
+          }
+          community_file() {
+            case "$1" in
+              README | README.* | CHANGELOG | CHANGELOG.* | CHANGES | CHANGES.* | CONTRIBUTING | CONTRIBUTING.* | CODE_OF_CONDUCT | CODE_OF_CONDUCT.* | SECURITY | SECURITY.* | LICENSE | LICENSE.* | LICENCE | LICENCE.* | COPYING | NOTICE | AUTHORS) return 0 ;;
+            esac
+            return 1
+          }
+          ref_tree() { # shallow copy of the tree CI would test (the PR merge ref) in $scratch; non-zero on any doubt
+            local rev tw=
+            case "$EVENT" in
+              pull_request) rev="refs/pull/$PR/merge" ;;
+              *) rev="$AFTER" ;;
+            esac
+            command -v timeout >/dev/null 2>&1 && tw="timeout 120"
+            scratch=$(mktemp -d) || { why="no scratch dir"; return 1; }
+            git -C "$scratch" init -q || { why="git init failed"; return 1; }
+            # the token travels in the environment, never argv (/proc/<pid>/cmdline is world-readable)
+            GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$SERVER/.extraheader" \
+              GIT_CONFIG_VALUE_0="Authorization: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
+              $tw git -C "$scratch" fetch -q --depth=1 --no-tags "$SERVER/$REPO.git" "$rev" || { why="tree fetch failed ($rev)"; return 1; }
+          }
+          # ignore lists name files to leave out, never to read
+          ignore_file() {
+            case "${1##*/}" in .gitignore | .dockerignore | .npmignore | .prettierignore | .eslintignore | .gitattributes | .gitleaksignore | .markdownlintignore) return 0 ;; esac
+            return 1
+          }
+          # third-party trees carry their own README/LICENSE/CHANGELOG mentions; they never read ours
+          vendored() {
+            case "$1" in
+              vendor/* | */vendor/* | node_modules/* | */node_modules/* | third_party/* | */third_party/*) return 0 ;;
+            esac
+            return 1
+          }
+          # Does file $1 carry $2 on a line that is code? 0 = yes, 1 = no, 2 = the check itself failed
+          # (a failed reader must never read as "no": the caller turns 2 into full CI). A comment
+          # line ("// see CLAUDE.md") names a doc without reading it; directives that read ARE live
+          # (//go:embed, #[doc = include_str!]). An occurrence inside an http(s)/ftp URL is a link,
+          # not a read. $3 = 1 (a dotless name such as LICENSE or CNAME, an English word or a bare
+          # file name) additionally needs a read-ish directive on the line.
+          live_mention() {
+            local blob rc=0
+            blob=$(git -C "$scratch" cat-file blob "FETCH_HEAD:$1") || return 2
+            printf '%s\n' "$blob" | LC_ALL=C awk -v n="$2" -v strict="${3:-0}" '
+              { s = $0; off = 0
+                while ((i = index(s, n)) > 0) {
+                  pre = substr($0, 1, off + i - 1); sub(/[A-Za-z0-9_@+.\/:~%-]*$/, "", pre)
+                  tok = substr($0, length(pre) + 1, off + i - 1 - length(pre))
+                  if (tok !~ /(https?|ftp):\/\//) { l = $0; sub(/^[ \t]+/, "", l)
+                    # a flag line (`--config docs/x.md`) is code; only `-- ` / `--` alone is an SQL comment
+                    if ((l ~ /^(\/\/go:|#\[|#!|#include|#embed|#import)/ || l !~ /^(\/\/|#|\* |\*\/|\*$|\/\*|-- |--$|<!--)/) \
+                        && (strict == 0 || $0 ~ /go:embed|include_str!|include_bytes!|ReadFile|readFile|read_text|open\(|fopen|file_get_contents|File\.read|COPY|ADD/)) { found = 1; exit } }
+                  off += i + length(n) - 1; s = substr(s, i + length(n)) } }
+              END { exit !found }' || rc=$?
+            [ "$rc" -le 1 ] || return 2
+            return "$rc"
+          }
+          # Does a non-doc tracked file read any of the candidate docs? 0 = no, 1 = yes (why says
+          # which), 2 = the scan itself failed. Any non-zero means full CI. git grep -z: the path is
+          # NUL-terminated, so a ':' in a path cannot mis-cut it (NULs cannot live in a variable, hence the file).
+          ref_scan() {
+            local pats="$scratch/pats" out="$scratch/hits" f b pth m t bn dir stem p rc=0 lm start=$SECONDS
+            declare -A seen
+            : > "$pats"
+            for f in "$@"; do
+              b=${f##*/}
+              case "$b" in
+                *.*) printf '%s\n%s\n' "$f" "$b" >> "$pats" ;;
+                *) printf '%s\n' "$f" >> "$pats" ;; # dotless (LICENSE, docs/CNAME): full path only, and only on a read directive
+              esac
+            done
+            # (1) literal: the full path or the basename as a whole word. The basename is what
+            # filepath.Join(root, "docs", "x.md") and read('DESIGN.md') leave in the source.
+            git -C "$scratch" grep -I -z -w -F -o -f "$pats" FETCH_HEAD > "$out" || rc=$?
+            [ "$rc" -le 1 ] || { why="reference scan failed (git grep rc $rc)"; return 2; }
+            while IFS= read -r -d '' pth && IFS= read -r m; do
+              src=${pth#FETCH_HEAD:}
+              [ -z "${seen[$src|$m]:-}" ] || continue
+              seen[$src|$m]=1
+              [ $((SECONDS - start)) -lt 90 ] || { why="reference scan exceeded 90s"; return 2; }
+              is_doc "$src" && continue
+              vendored "$src" && continue
+              ignore_file "$src" && continue
+              pkg_manifest "$src" && community_file "${m##*/}" && continue
+              case "${m##*/}" in *.*) lm=0 ;; *) lm=1 ;; esac
+              live_mention "$src" "$m" "$lm" && lm=0 || lm=$?
+              case "$lm" in 0) ;; 1) continue ;; *) why="live-mention check failed for $src"; return 2 ;; esac
+              why="$m treated as code: referenced by $src"
+              return 1
+            done < "$out"
+            # (2) glob: embed/glob patterns with a literal stem (skills/d10-*.md) or a literal
+            # directory (skills/*.md). Bare `*.md` / `**/*.md` come from ignore files, linters and
+            # --include flags and would make every doc code: ignored, covered by --not-doc.
+            rc=0
+            git -C "$scratch" grep -I -z -o -E -e '[A-Za-z0-9_@+./*?-]*[*?][A-Za-z0-9_@+./*?-]*[.]mdx?' FETCH_HEAD > "$out" || rc=$?
+            [ "$rc" -le 1 ] || { why="glob scan failed (git grep rc $rc)"; return 2; }
+            while IFS= read -r -d '' pth && IFS= read -r t; do
+              src=${pth#FETCH_HEAD:}
+              [ -z "${seen[$src|$t]:-}" ] || continue
+              seen[$src|$t]=1
+              is_doc "$src" && continue
+              vendored "$src" && continue
+              bn=${t##*/}; dir=
+              case "$t" in */*) dir=${t%/*} ;; esac
+              stem=${bn//[*?]/}; stem=${stem%.mdx}; stem=${stem%.md}
+              if [ -z "$stem" ]; then
+                case "$dir" in "" | *[*?]*) continue ;; esac
+              fi
+              for p in "$@"; do
+                case "$p" in
+                  $t | */$t)
+                    live_mention "$src" "$t" 0 && lm=0 || lm=$?
+                    case "$lm" in 0) ;; 1) break ;; *) why="live-mention check failed for $src"; return 2 ;; esac
+                    why="$t treated as code: glob in $src matches $p"
+                    return 1 ;;
+                esac
+              done
+              [ $((SECONDS - start)) -lt 90 ] || { why="reference scan exceeded 90s"; return 2; }
+            done < "$out"
+            return 0
+          }
           docs_only=false
+          cands=()
           # `if !` keeps errexit off for the whole listing: every doubt is an explicit return 1
-          if ! list=$(touched); then
+          if ! touched; then
             why=${why:-listing failed}
-          elif [ -z "$list" ]; then
+          elif [ -z "${LIST//$'\n'/}" ]; then
             why="no changed paths"
           else
             docs_only=true
-            while IFS= read -r f; do is_doc "$f" || { docs_only=false; why="code path: $f"; break; }; done <<<"$list"
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              if is_doc "$f"; then cands+=("$f"); else docs_only=false; why="code path: $f"; break; fi
+            done <<<"$LIST"
+            if [ "$docs_only" = true ]; then
+              rc=0
+              if ! ref_tree; then
+                docs_only=false; why=${why:-tree fetch failed}
+              else
+                ref_scan "${cands[@]}" || rc=$?
+                [ "$rc" -eq 0 ] || { docs_only=false; why=${why:-reference scan failed}; }
+              fi
+              [ "$docs_only" != true ] || why="${#cands[@]} doc paths, none read by code"
+            fi
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "docs-only: $docs_only${why:+ ($why)}" >> "$GITHUB_STEP_SUMMARY"
+          echo "docs-only: $docs_only${why:+ ($why)}" | tee -a "$GITHUB_STEP_SUMMARY"
 
   fmt:
     needs: [docs-scope]

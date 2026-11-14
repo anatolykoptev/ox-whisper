@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.3](https://github.com/anatolykoptev/ox-whisper/compare/v0.9.2...v0.9.3) (2026-11-14)
+
+
+### Documentation
+
+* bring repository documents up to the repo-standards set ([#73](https://github.com/anatolykoptev/ox-whisper/issues/73)) ([d0c5dac](https://github.com/anatolykoptev/ox-whisper/commit/d0c5dac08712960a7cc9fb854677765f3ba14a24))
+* **vendor:** add upstream MIT LICENSE to vendored sherpa-rs crates ([#77](https://github.com/anatolykoptev/ox-whisper/issues/77)) ([bed1750](https://github.com/anatolykoptev/ox-whisper/commit/bed17508fbbc0b59d42a0bb5fca823e9c2477bdb))
+
 ## [0.9.2](https://github.com/anatolykoptev/ox-whisper/compare/v0.9.1...v0.9.2) (2026-10-03)
 
 

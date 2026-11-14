@@ -783,7 +783,6 @@ dependencies = [
  "anyhow",
  "axum",
  "flate2",
- "futures-core",
  "futures-util",
  "memchr",
  "metrics",
